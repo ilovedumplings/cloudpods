@@ -32,8 +32,8 @@ type IServerBaseDeployTask interface {
 	IPXEBootTask
 
 	RemoveEFIOSEntry() bool
-	DoDeploys(term *ssh.Client) (jsonutils.JSONObject, error)
-	PostDeploys(term *ssh.Client) error
+	DoDeploys(ctx context.Context, term *ssh.Client) (jsonutils.JSONObject, error)
+	PostDeploys(ctx context.Context, term *ssh.Client) error
 }
 
 type SBaremetalServerBaseDeployTask struct {
@@ -85,11 +85,11 @@ func (self *SBaremetalServerBaseDeployTask) RemoveEFIOSEntry() bool {
 	return false
 }
 
-func (self *SBaremetalServerBaseDeployTask) DoDeploys(_ *ssh.Client) (jsonutils.JSONObject, error) {
+func (self *SBaremetalServerBaseDeployTask) DoDeploys(ctx context.Context, _ *ssh.Client) (jsonutils.JSONObject, error) {
 	return nil, nil
 }
 
-func (self *SBaremetalServerBaseDeployTask) PostDeploys(_ *ssh.Client) error {
+func (self *SBaremetalServerBaseDeployTask) PostDeploys(_ context.Context, _ *ssh.Client) error {
 	return nil
 }
 
@@ -102,12 +102,12 @@ func (self *SBaremetalServerBaseDeployTask) OnPXEBoot(ctx context.Context, term 
 		}
 	}
 
-	result, err := self.IServerBaseDeployTask().DoDeploys(term)
+	result, err := self.IServerBaseDeployTask().DoDeploys(ctx, term)
 	if err != nil {
 		return errors.Wrap(err, "Do deploy")
 	}
 
-	if err := AdjustUEFIBootOrder(term, self.Baremetal); err != nil {
+	if err := AdjustUEFIBootOrder(ctx, term, self.Baremetal); err != nil {
 		return errors.Wrap(err, "Adjust UEFI boot order")
 	}
 
@@ -119,7 +119,7 @@ func (self *SBaremetalServerBaseDeployTask) OnPXEBoot(ctx context.Context, term 
 		return errors.Wrap(err, "Sync disk")
 	}
 
-	if err := self.IServerBaseDeployTask().PostDeploys(term); err != nil {
+	if err := self.IServerBaseDeployTask().PostDeploys(ctx, term); err != nil {
 		return errors.Wrap(err, "post deploy")
 	}
 
@@ -134,7 +134,7 @@ func (self *SBaremetalServerBaseDeployTask) OnPXEBoot(ctx context.Context, term 
 					return errors.Wrap(err, "Ensure power up")
 				}
 			}
-			self.Baremetal.AutoSyncAllStatus()
+			self.Baremetal.AutoSyncAllStatus(ctx)
 		} else {
 			if onFinishAction == "shutdown" {
 				log.Infof("None BMC baremetal can't shutdown when deploying")
@@ -147,12 +147,12 @@ func (self *SBaremetalServerBaseDeployTask) OnPXEBoot(ctx context.Context, term 
 				// do restart
 				// hack: ssh reboot to disk
 				self.needPXEBoot = false
-				if err := self.EnsureSSHReboot(); err != nil {
+				if err := self.EnsureSSHReboot(ctx); err != nil {
 					return errors.Wrap(err, "Try ssh reboot")
 				}
 			}
 		}
-		self.Baremetal.SyncAllStatus(types.POWER_STATUS_ON)
+		self.Baremetal.SyncAllStatus(ctx, types.POWER_STATUS_ON)
 	}
 	SetTaskComplete(self, result)
 	return nil

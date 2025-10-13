@@ -28,6 +28,7 @@ import (
 	"yunion.io/x/pkg/util/osprofile"
 	"yunion.io/x/pkg/utils"
 
+	"yunion.io/x/cloudmux/pkg/apis"
 	api "yunion.io/x/cloudmux/pkg/apis/compute"
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/cloudmux/pkg/multicloud"
@@ -119,7 +120,6 @@ type SInstance struct {
 	Onboot      bool       `json:"onboot"`
 	Startup     string     `json:"startup,omitempty"`
 	Tablet      bool       `json:"tablet"`
-	Agent       int        `json:"agent"`
 	Memory      int        `json:"memory"`
 	Balloon     int        `json:"balloon"`
 	QemuOs      string     `json:"ostype"`
@@ -170,7 +170,10 @@ type SInstance struct {
 }
 
 func (self *SInstance) GetName() string {
-	return self.Name
+	if len(self.Name) > 0 {
+		return self.Name
+	}
+	return self.GetId()
 }
 
 func (self *SInstance) GetId() string {
@@ -284,7 +287,7 @@ func (self *SInstance) GetError() error {
 }
 
 func (self *SInstance) GetHostname() string {
-	return self.GetName()
+	return ""
 }
 
 func (self *SInstance) GetHypervisor() string {
@@ -393,7 +396,10 @@ func (self *SInstance) GetOsType() cloudprovider.TOsType {
 }
 
 func (ins *SInstance) GetOsArch() string {
-	return "x86_64"
+	if utils.IsInStringArray(ins.QemuCpu, []string{"neoverse-n1"}) || strings.HasPrefix(ins.QemuCpu, "cortex-a") {
+		return apis.OS_ARCH_AARCH64
+	}
+	return ins.host.GetCpuArchitecture()
 }
 
 func (ins *SInstance) GetOsDist() string {
@@ -489,7 +495,7 @@ func (self *SRegion) GetVmAgentNetworkInterfaces(node string, VmId int) (map[str
 	res := fmt.Sprintf("/nodes/%s/qemu/%d/agent/network-get-interfaces", node, VmId)
 	err := self.getAgent(res, url.Values{}, &intermediates)
 	if err != nil {
-		return nil, errors.Wrap(err, "GetVmAgentNetworkInterfaces")
+		return ipMap, errors.Wrap(err, "GetVmAgentNetworkInterfaces")
 	}
 
 	for _, intermediate := range intermediates {
@@ -608,19 +614,6 @@ func (self *SRegion) GetQemuConfig(node string, VmId int) (*SInstance, error) {
 		config.Sshkeys, _ = url.PathUnescape(vmConfig["sshkeys"].(string))
 	}
 
-	agent := 0
-	if _, ok := vmConfig["agent"]; ok {
-		switch vmConfig["agent"].(type) {
-		case int64:
-			agent = int(vmConfig["agent"].(int64))
-		case string:
-			agentConfList := strings.Split(vmConfig["agent"].(string), ",")
-			agent, _ = strconv.Atoi(agentConfList[0])
-		}
-
-	}
-	config.Agent = agent
-
 	config.PowerState = self.GetVmPowerStatus(node, VmId)
 
 	// Add disks.
@@ -710,7 +703,7 @@ func (self *SRegion) GetQemuConfig(node string, VmId int) (*SInstance, error) {
 	// Add networks.
 	nicNames := []string{}
 	ipMap := make(map[string]string)
-	if config.PowerState == "running" && config.Agent == 1 {
+	if config.PowerState == "running" {
 		ipMap, _ = self.GetVmAgentNetworkInterfaces(node, VmId)
 	}
 
@@ -838,7 +831,7 @@ func (self *SRegion) GetInstance(id string) (*SInstance, error) {
 	nodeName := ""
 	vmId, _ := strconv.Atoi(id)
 	if resource, ok := resources[vmId]; !ok {
-		return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+		return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 	} else {
 		nodeName = resource.Node
 	}

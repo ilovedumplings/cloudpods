@@ -116,11 +116,11 @@ type SAlert struct {
 	//db.SStatusResourceBase
 
 	// Frequency is evaluate period
-	Frequency int64                `nullable:"false" list:"user" create:"required" update:"user"`
-	Settings  jsonutils.JSONObject `nullable:"false" list:"user" create:"required" update:"user" length:"medium"`
-	Level     string               `charset:"ascii" width:"36" nullable:"false" default:"normal" list:"user" update:"user"`
-	Message   string               `charset:"utf8" list:"user" create:"optional" update:"user"`
-	UsedBy    string               `charset:"ascii" create:"optional" list:"user"`
+	Frequency int64                 `nullable:"false" list:"user" create:"required" update:"user"`
+	Settings  *monitor.AlertSetting `nullable:"false" list:"user" create:"required" update:"user" length:"medium"`
+	Level     string                `charset:"ascii" width:"36" nullable:"false" default:"normal" list:"user" update:"user"`
+	Message   string                `charset:"utf8" list:"user" create:"optional" update:"user"`
+	UsedBy    string                `charset:"ascii" create:"optional" list:"user"`
 
 	// Silenced       bool
 	ExecutionError string `charset:"utf8" list:"user"`
@@ -184,14 +184,7 @@ func (alert *SAlert) ShouldUpdateState(newState monitor.AlertStateType) bool {
 }
 
 func (alert *SAlert) GetSettings() (*monitor.AlertSetting, error) {
-	setting := new(monitor.AlertSetting)
-	if alert.Settings == nil {
-		return setting, nil
-	}
-	if err := alert.Settings.Unmarshal(setting); err != nil {
-		return nil, errors.Wrapf(err, "alert %s unmarshal", alert.GetId())
-	}
-	return setting, nil
+	return alert.Settings, nil
 }
 
 type AlertRuleTags map[string]AlertRuleTag
@@ -291,6 +284,10 @@ func (man *SAlertManager) ListItemFilter(
 	q, err = man.SEnabledResourceBaseManager.ListItemFilter(ctx, q, userCred, input.EnabledResourceBaseListInput)
 	if err != nil {
 		return nil, errors.Wrap(err, "SEnabledResourceBaseManager.ListItemFilter")
+	}
+	if len(input.MonitorResourceId) != 0 {
+		sq := MonitorResourceAlertManager.Query("alert_id").In("monitor_resource_id", input.MonitorResourceId).SubQuery()
+		q = q.In("id", sq)
 	}
 	return q, nil
 }
@@ -455,15 +452,6 @@ func (alert *SAlert) SetState(input AlertSetStateInput) error {
 }
 
 func (alert *SAlert) ValidateUpdateData(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input monitor.AlertUpdateInput) (monitor.AlertUpdateInput, error) {
-	if input.Settings != nil {
-		updateSettings := jsonutils.NewDict()
-		updateSettings.Update(alert.Settings)
-		updateSettings.Update(jsonutils.Marshal(input.Settings))
-		input.Settings = new(monitor.AlertSetting)
-		if err := updateSettings.Unmarshal(input.Settings); err != nil {
-			return input, err
-		}
-	}
 	var err error
 	input.StandaloneResourceBaseUpdateInput, err = alert.SStandaloneResourceBase.ValidateUpdateData(ctx, userCred, query, input.StandaloneResourceBaseUpdateInput)
 	if err != nil {

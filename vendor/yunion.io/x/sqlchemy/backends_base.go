@@ -154,6 +154,11 @@ func (bb *SBaseBackend) INET_ATON(field IQueryField) IQueryField {
 	return NewFunctionField("", false, `INET_ATON(%s)`, field)
 }
 
+// INET6_ATON represents a SQL function INET6_ATON
+func (bb *SBaseBackend) INET6_ATON(field IQueryField) IQueryField {
+	return NewFunctionField("", false, `INET6_ATON(%s)`, field)
+}
+
 // SubStr represents a SQL function SUBSTR
 func (bb *SBaseBackend) SUBSTR(name string, field IQueryField, pos, length int) IQueryField {
 	var rightStr string
@@ -257,4 +262,9 @@ func (bb *SBaseBackend) QuoteChar() string {
 
 func (bb *SBaseBackend) PrepareInsertOrUpdateSQL(ts ITableSpec, insertColNames []string, insertFields []string, onPrimaryCols []string, updateSetCols []string, insertValues []interface{}, updateValues []interface{}) (string, []interface{}) {
 	return "", nil
+}
+
+func (bb *SBaseBackend) Equals(f IQueryField, v interface{}) ICondition {
+	c := SEqualsCondition{NewTupleCondition(f, v)}
+	return &c
 }

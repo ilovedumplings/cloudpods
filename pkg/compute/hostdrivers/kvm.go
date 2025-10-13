@@ -59,6 +59,10 @@ func (self *SKVMHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_KVM
 }
 
+func (self *SKVMHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_ONECLOUD
+}
+
 func (self *SKVMHostDriver) validateGPFS(ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, input api.HostStorageCreateInput) (api.HostStorageCreateInput, error) {
 	header := http.Header{}
 	header.Set(mcclient.AUTH_TOKEN, userCred.GetTokenString())
@@ -226,11 +230,11 @@ func (self *SKVMHostDriver) CheckAndSetCacheImage(ctx context.Context, userCred 
 			return err
 		}
 
-		srcHost, err := srcHostCacheImage.GetHost()
+		/*srcHost, err := srcHostCacheImage.GetHost()
 		if err != nil {
 			return errors.Wrapf(err, "Get storage cached image %s host", srcHostCacheImage.GetId())
 		}
-		input.SrcUrl = fmt.Sprintf("%s/download/images/%s", srcHost.ManagerUri, input.ImageId)
+		input.SrcUrl = fmt.Sprintf("%s/download/images/%s", srcHost.ManagerUri, input.ImageId)*/
 	}
 
 	url := fmt.Sprintf("%s/disks/image_cache", host.ManagerUri)
@@ -248,32 +252,26 @@ func (self *SKVMHostDriver) CheckAndSetCacheImage(ctx context.Context, userCred 
 	return nil
 }
 
-func (self *SKVMHostDriver) RequestUncacheImage(ctx context.Context, host *models.SHost, storageCache *models.SStoragecache, task taskman.ITask) error {
-	type contentStruct struct {
-		ImageId        string
-		StoragecacheId string
-	}
+func (self *SKVMHostDriver) RequestUncacheImage(ctx context.Context, host *models.SHost, storageCache *models.SStoragecache, task taskman.ITask, deactivateImage bool) error {
+	input := api.UncacheImageInput{}
+	task.GetParams().Unmarshal(&input)
 
-	params := task.GetParams()
-	imageId, err := params.GetString("image_id")
-	if err != nil {
-		return err
-	}
-
-	content := contentStruct{}
-	content.ImageId = imageId
-	content.StoragecacheId = storageCache.Id
+	input.StoragecacheId = storageCache.Id
+	input.DeactivateImage = &deactivateImage
 
 	url := fmt.Sprintf("%s/disks/image_cache", host.ManagerUri)
 
 	body := jsonutils.NewDict()
-	body.Add(jsonutils.Marshal(&content), "disk")
+	body.Add(jsonutils.Marshal(&input), "disk")
+	if deactivateImage {
+		body.Add(jsonutils.JSONTrue, "deactivate_image")
+	}
 
 	header := task.GetTaskRequestHeader()
 
-	_, _, err = httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "DELETE", url, header, body, false)
+	_, _, err := httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "DELETE", url, header, body, false)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "JSONRequest")
 	}
 	return nil
 }
@@ -424,14 +422,23 @@ func (self *SKVMHostDriver) RequestSaveUploadImageOnHost(ctx context.Context, ho
 	return err
 }
 
-func (self *SKVMHostDriver) RequestDeleteSnapshotsWithStorage(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, task taskman.ITask) error {
+func (self *SKVMHostDriver) RequestDeleteSnapshotsWithStorage(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, task taskman.ITask, snapshotIds []string) error {
 	url := fmt.Sprintf("/storages/%s/delete-snapshots", snapshot.StorageId)
 	body := jsonutils.NewDict()
 	body.Set("disk_id", jsonutils.NewString(snapshot.DiskId))
+	body.Set("snapshot_ids", jsonutils.NewStringArray(snapshotIds))
 
 	header := task.GetTaskRequestHeader()
 
 	_, err := host.Request(ctx, task.GetUserCred(), "POST", url, header, body)
+	return err
+}
+
+func (self *SKVMHostDriver) RequestDeleteSnapshotWithoutGuest(ctx context.Context, host *models.SHost, snapshot *models.SSnapshot, params *jsonutils.JSONDict, task taskman.ITask) error {
+	url := fmt.Sprintf("/storages/%s/delete-snapshot", snapshot.StorageId)
+	header := task.GetTaskRequestHeader()
+
+	_, err := host.Request(ctx, task.GetUserCred(), "POST", url, header, params)
 	return err
 }
 
@@ -700,4 +707,15 @@ func (driver *SKVMHostDriver) RequestProbeIsolatedDevices(ctx context.Context, u
 		return nil, errors.Wrapf(err, "send to host %s", url)
 	}
 	return respBody.(*jsonutils.JSONArray), err
+}
+
+func (driver *SKVMHostDriver) RequestUploadGuestsStatus(ctx context.Context, host *models.SHost, guests []models.SGuest, task taskman.ITask) error {
+	input := &api.HostUploadGuestsStatusRequest{GuestIds: make([]string, len(guests))}
+	for i := range guests {
+		input.GuestIds[i] = guests[i].Id
+	}
+	header := task.GetTaskRequestHeader()
+	url := fmt.Sprintf("/servers/upload-status")
+	_, err := host.Request(ctx, task.GetUserCred(), "POST", url, header, jsonutils.Marshal(input))
+	return err
 }

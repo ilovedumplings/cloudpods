@@ -53,12 +53,16 @@ func (self *SProxmoxHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_PROXMOX
 }
 
+func (self *SProxmoxHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_PROXMOX
+}
+
 func (self *SProxmoxHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	return nil
 }
 
 func (driver *SProxmoxHostDriver) GetStoragecacheQuota(host *models.SHost) int {
-	return 100
+	return -1
 }
 
 func (self *SProxmoxHostDriver) CheckAndSetCacheImage(ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, storageCache *models.SStoragecache, task taskman.ITask) error {
@@ -112,7 +116,7 @@ func (self *SProxmoxHostDriver) CheckAndSetCacheImage(ctx context.Context, userC
 				}
 			}
 			if !find {
-				return nil, errors.Wrapf(cloudprovider.ErrNotFound, image.ExternalId)
+				return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", image.ExternalId)
 			}
 			opts.ExternalId = image.ExternalId
 		} else {

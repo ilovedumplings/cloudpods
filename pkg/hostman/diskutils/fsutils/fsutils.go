@@ -15,9 +15,10 @@
 package fsutils
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
-	"io"
-	"io/ioutil"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"yunion.io/x/pkg/utils"
 
 	"yunion.io/x/onecloud/pkg/hostman/diskutils/deploy_iface"
+	"yunion.io/x/onecloud/pkg/hostman/diskutils/fsutils/driver"
 	"yunion.io/x/onecloud/pkg/hostman/guestfs"
 	"yunion.io/x/onecloud/pkg/hostman/guestfs/fsdriver"
 	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
@@ -124,16 +126,27 @@ func ParseDiskPartition(dev string, lines []string) ([][]string, string) {
 	return parts, label
 }
 
-func GetDevSector512Count(dev string) int {
-	sizeStr, _ := fileutils2.FileGetContents(fmt.Sprintf("/sys/block/%s/size", dev))
-	sizeStr = strings.Trim(sizeStr, "\n")
-	size, _ := strconv.Atoi(sizeStr)
-	return size
+// use proc driver do resizefs
+func ResizeDiskFs(diskPath string, sizeMb int, mounted bool) error {
+	fsutilDriver := NewFsutilDriver(driver.NewProcDriver())
+	return fsutilDriver.ResizeDiskFs(diskPath, sizeMb, mounted)
 }
 
-func ResizeDiskFs(diskPath string, sizeMb int) error {
+func (d *SFsutilDriver) ResizeDiskFs(diskPath string, sizeMb int, mounted bool) error {
+	fPath, fs, err := d.ResizeDiskPartition(diskPath, sizeMb)
+	if err != nil {
+		return err
+	}
+	err, _ = d.ResizePartitionFs(fPath, fs, false, mounted)
+	if err != nil {
+		return errors.Wrapf(err, "resize fs %s", fs)
+	}
+	return nil
+}
+
+func (d *SFsutilDriver) ResizeDiskPartition(diskPath string, sizeMb int) (string, string, error) {
 	var cmds = []string{"parted", "-a", "none", "-s", diskPath, "--", "unit", "s", "print"}
-	lines, err := procutils.NewCommand(cmds[0], cmds[1:]...).Output()
+	lines, err := d.Exec(cmds[0], cmds[1:]...)
 	if err != nil {
 		hasPartTable := func() bool {
 			for _, line := range strings.Split(string(lines), "\n") {
@@ -144,74 +157,114 @@ func ResizeDiskFs(diskPath string, sizeMb int) error {
 			return false
 		}
 		if hasPartTable() {
-			return nil
+			return "", "", nil
 		}
 		log.Errorf("resize disk fs fail, output: %s , error: %s", lines, err)
-		return err
+		return "", "", err
 	}
 	parts, label := ParseDiskPartition(diskPath, strings.Split(string(lines), "\n"))
 	log.Infof("Parts: %v label: %s", parts, label)
 	if label == "gpt" {
-		proc := procutils.NewCommand("gdisk", diskPath)
-		stdin, err := proc.StdinPipe()
-		if err != nil {
-			return err
+		retCode, stdout, stderr, e := d.ExecInputWait("gdisk", []string{diskPath}, []string{"r", "e", "Y", "w", "Y", "Y"})
+		if e != nil {
+			return "", "", errors.Wrap(e, "gdisk exec failed")
 		}
-		defer stdin.Close()
-
-		outb, err := proc.StdoutPipe()
-		if err != nil {
-			return err
-		}
-		defer outb.Close()
-
-		errb, err := proc.StderrPipe()
-		if err != nil {
-			return err
-		}
-		defer errb.Close()
-
-		if err := proc.Start(); err != nil {
-			return err
-		}
-		for _, s := range []string{"r", "e", "Y", "w", "Y", "Y"} {
-			io.WriteString(stdin, fmt.Sprintf("%s\n", s))
-		}
-		stdoutPut, err := ioutil.ReadAll(outb)
-		if err != nil {
-			return err
-		}
-		stderrOutPut, err := ioutil.ReadAll(errb)
-		if err != nil {
-			return err
-		}
-		log.Infof("gdisk: %s %s", stdoutPut, stderrOutPut)
-		if err = proc.Wait(); err != nil {
-			if status, succ := proc.GetExitStatus(err); succ {
-				if status != 1 {
-					return err
-				}
-			} else {
-				return err
-			}
+		log.Infof("gdisk: %s %s", stdout, stderr)
+		if retCode != 1 && retCode != 0 {
+			return "", "", errors.Errorf("Exit Code %d: %s\n%s", retCode, stdout, stderr)
 		}
 	}
 	if len(parts) > 0 && (label == "gpt" ||
 		(label == "msdos" && parts[len(parts)-1][5] == "primary")) {
 		var part = parts[len(parts)-1]
-		if IsSupportResizeFs(part[6]) {
+		fsType := part[6]
+		if len(fsType) == 0 {
+			partDev := fmt.Sprintf("%s%s", diskPath, part[0])
+			fsType = d.GetFsFormat(partDev)
+			log.Infof("blkid get fstype %s", fsType)
+		}
+		if part[5] == "lvm" || IsSupportResizeFs(fsType) || part[5] == "primary" {
 			// growpart script replace parted resizepart
-			output, err := procutils.NewCommand("growpart", diskPath, part[0]).Output()
+			output, err := d.Exec("growpart", diskPath, part[0])
 			if err != nil {
-				return errors.Wrapf(err, "growpart failed %s", output)
+				return "", "", errors.Wrapf(err, "growpart failed %s", output)
 			}
-			err, _ = ResizePartitionFs(part[7], part[6], false)
-			if err != nil {
-				return errors.Wrapf(err, "resize fs %s", part[6])
-			}
+			return part[7], fsType, nil
 		}
 	}
-	return nil
+	return "", "", nil
+}
+
+func (d *SFsutilDriver) ResizeDiskWithDiskId(diskId string, rootPartDev string, onlineResize bool) error {
+	// find partition need resize
+	resizeDev, err := d.GetResizeDevBySerial(diskId)
+	if err != nil {
+		return err
+	}
+	if resizeDev == "" {
+		log.Errorf("failed find disk serial %s", diskId)
+		return nil
+	}
+	partDev, fsType, err := d.ResizeDiskPartition(resizeDev, 0)
+	if err != nil {
+		return err
+	}
+	if partDev == "" || fsType == "" {
+		if fsType == "" && partDev != "" {
+			// fsType empty and partDev not empty is lvm device
+			resizeDev = partDev
+		}
+
+		if !d.IsLvmPvDevice(resizeDev) {
+			fsType = d.GetFsFormat(resizeDev)
+			err, _ := d.ResizePartitionFs(resizeDev, fsType, false, onlineResize)
+			return err
+		}
+		if err := d.Pvresize(resizeDev); err != nil {
+			return err
+		}
+
+		vg := d.GetVgOfPvDevice(resizeDev)
+		if vg == "" {
+			return nil
+		}
+		lvs, err := d.GetVgLvs(vg)
+		if err != nil {
+			log.Errorf("failed get vg lvs %s: %s", vg, err)
+		}
+		if len(lvs) == 0 {
+			log.Infof("disk %s has no lv, skip resize", diskId)
+			return nil
+		}
+
+		var resizeLv string
+		if rootPartDev != "" {
+			for i := range lvs {
+				if lvs[i].LvPath == rootPartDev {
+					resizeLv = rootPartDev
+					break
+				}
+			}
+		}
+		if resizeLv == "" {
+			if len(lvs) != 1 {
+				log.Errorf("disk %s has multi lv and no rootfs, skip resize partition", diskId)
+				return nil
+			} else {
+				resizeLv = lvs[0].LvPath
+			}
+		}
+		err = d.ExtendLv(resizeLv)
+		if err != nil {
+			return err
+		}
+		fsType = d.GetFsFormat(resizeLv)
+		err, _ = d.ResizePartitionFs(resizeLv, fsType, false, onlineResize)
+		return err
+	} else {
+		err, _ = d.ResizePartitionFs(partDev, fsType, false, onlineResize)
+		return err
+	}
 }
 
 func IsSupportResizeFs(fs string) bool {
@@ -219,19 +272,20 @@ func IsSupportResizeFs(fs string) bool {
 		return true
 	} else if strings.HasPrefix(fs, "ext") {
 		return true
-	} else if fs == "xfs" {
+	} else if fs == "xfs" || fs == "f2fs" {
 		return true
 	}
 	return false
 }
 
-func ResizePartitionFs(fpath, fs string, raiseError bool) (error, bool) {
+func (d *SFsutilDriver) ResizePartitionFs(fpath, fs string, raiseError, onlineResize bool) (error, bool) {
+	log.Errorf("ResizePartitionFs fstype %s", fs)
 	if len(fs) == 0 {
 		return nil, false
 	}
 	var (
 		cmds     = [][]string{}
-		uuids, _ = fileutils2.GetDevUuid(fpath)
+		uuids, _ = d.GetDevUuid(fpath)
 	)
 	if strings.HasPrefix(fs, "linux-swap") {
 		if v, ok := uuids["UUID"]; ok {
@@ -240,47 +294,58 @@ func ResizePartitionFs(fpath, fs string, raiseError bool) (error, bool) {
 			cmds = [][]string{{"mkswap", fpath}}
 		}
 	} else if strings.HasPrefix(fs, "ext") {
-		if !FsckExtFs(fpath) {
-			if raiseError {
-				return fmt.Errorf("Failed to fsck ext fs %s", fpath), false
-			} else {
-				return nil, false
+		if !onlineResize {
+			if !d.FsckExtFs(fpath) {
+				if raiseError {
+					return fmt.Errorf("Failed to fsck ext fs %s", fpath), false
+				} else {
+					return nil, false
+				}
 			}
 		}
+
 		cmds = [][]string{{"resize2fs", fpath}}
 	} else if fs == "xfs" {
-		var tmpPoint = fmt.Sprintf("/tmp/%s", strings.Replace(fpath, "/", "_", -1))
-		if _, err := procutils.NewCommand("mountpoint", tmpPoint).Output(); err == nil {
-			output, err := procutils.NewCommand("umount", "-f", tmpPoint).Output()
-			if err != nil {
-				log.Errorf("failed umount %s: %s, %s", tmpPoint, err, output)
-				return err, false
-			}
-		}
-		FsckXfsFs(fpath)
 		uuid := uuids["UUID"]
 		if len(uuid) > 0 {
 			xfsutils.LockXfsPartition(uuid)
 			defer xfsutils.UnlockXfsPartition(uuid)
 		}
-		cmds = [][]string{{"mkdir", "-p", tmpPoint},
-			{"mount", fpath, tmpPoint},
-			{"sleep", "2"},
-			{"xfs_growfs", tmpPoint},
-			{"sleep", "2"},
-			{"umount", tmpPoint},
-			{"sleep", "2"},
-			{"rm", "-fr", tmpPoint}}
+		if !onlineResize {
+			var tmpPoint = fmt.Sprintf("/tmp/%s", strings.Replace(fpath, "/", "_", -1))
+			if _, err := d.Exec("mountpoint", tmpPoint); err == nil {
+				output, err := d.Exec("umount", "-f", tmpPoint)
+				if err != nil {
+					log.Errorf("failed umount %s: %s, %s", tmpPoint, err, output)
+					return err, false
+				}
+			}
+			d.FsckXfsFs(fpath)
+			cmds = [][]string{{"mkdir", "-p", tmpPoint},
+				{"mount", fpath, tmpPoint},
+				{"sleep", "2"},
+				{"xfs_growfs", tmpPoint},
+				{"sleep", "2"},
+				{"umount", tmpPoint},
+				{"sleep", "2"},
+				{"rm", "-fr", tmpPoint}}
+		} else {
+			cmds = [][]string{{"xfs_growfs", fpath}}
+		}
 	} else if fs == "ntfs" {
 		// the following cmds may cause disk damage on Windows 10 with new version of NTFS
 		// comment out the following codes only impact Windows 2003
 		// as windows 2003 deprecated, so choose to sacrifies windows 2003
 		// cmds = [][]string{{"ntfsresize", "-c", fpath}, {"ntfsresize", "-P", "-f", fpath}}
+	} else if fs == "f2fs" {
+		if !onlineResize {
+			cmds = [][]string{{"resize.f2fs", fpath}}
+		}
 	}
 
 	if len(cmds) > 0 {
 		for _, cmd := range cmds {
-			output, err := procutils.NewCommand(cmd[0], cmd[1:]...).Output()
+			output, err := d.Exec(cmd[0], cmd[1:]...)
 			if err != nil {
 				log.Errorf("resize partition: %s, %s", err, output)
 				if raiseError {
@@ -294,37 +359,31 @@ func ResizePartitionFs(fpath, fs string, raiseError bool) (error, bool) {
 	return nil, true
 }
 
-func FsckExtFs(fpath string) bool {
+func (d *SFsutilDriver) FsckExtFs(fpath string) bool {
 	log.Debugf("Exec command: %v", []string{"e2fsck", "-f", "-p", fpath})
-	cmd := procutils.NewCommand("e2fsck", "-f", "-p", fpath)
-	if err := cmd.Start(); err != nil {
-		log.Errorf("e2fsck start failed: %s", err)
-		return false
-	} else {
-		err = cmd.Wait()
-		if err != nil {
-			if status, ok := cmd.GetExitStatus(err); ok {
-				if status < 4 {
-					return true
-				}
-			}
-			log.Errorln(err)
+	retCode, stdout, stderr, err := d.ExecInputWait("e2fsck", []string{"-f", "-p", fpath}, nil)
+	if err != nil {
+		log.Errorf("exec e2fsck error %s retcode %d stdout %s stderr %s", err, retCode, stdout, stderr)
+		if retCode >= 4 {
 			return false
-		} else {
-			return true
 		}
 	}
+	if retCode < 4 {
+		return true
+	}
+	log.Errorf("failed e2fsck retcode %d %s %s", retCode, stdout, stderr)
+	return false
 }
 
 // https://bugs.launchpad.net/ubuntu/+source/xfsprogs/+bug/1718244
 // use xfs_repair -n instead
-func FsckXfsFs(fpath string) bool {
-	if output, err := procutils.NewCommand("xfs_check", fpath).Output(); err != nil {
+func (d *SFsutilDriver) FsckXfsFs(fpath string) bool {
+	if output, err := d.Exec("xfs_check", fpath); err != nil {
 		log.Errorf("xfs_check failed: %s, %s, try xfs_repair -n <dev> instead", err, output)
 		if output, err := procutils.NewCommand("xfs_repair", "-n", fpath).Output(); err != nil {
 			log.Errorf("xfs_repair -n dev failed: %s, %s", err, output)
 			// repair the xfs
-			procutils.NewCommand("xfs_repair", fpath).Output()
+			d.Exec("xfs_repair", fpath)
 			return false
 		}
 	}
@@ -381,7 +440,7 @@ func ext4UsageType(path string) string {
 	return ""
 }
 
-func FormatPartition(path, fs, uuid string) error {
+func FormatPartition(path, fs, uuid string, fsFeatures *apis.FsFeatures) error {
 	var cmd, cmdUuid []string
 	switch {
 	case fs == "swap":
@@ -393,7 +452,22 @@ func FormatPartition(path, fs, uuid string) error {
 		cmd = []string{"mkfs.ext3"}
 		cmdUuid = []string{"tune2fs", "-U", uuid}
 	case fs == "ext4":
-		cmd = []string{"mkfs.ext4", "-O", "^64bit", "-E", "lazy_itable_init=1"}
+		feature := "^64bit"
+		extendOpts := "lazy_itable_init=1"
+		featureOpts := []string{}
+		if fsFeatures != nil && fsFeatures.Ext4 != nil {
+			if fsFeatures.Ext4.CaseInsensitive {
+				feature = fmt.Sprintf("%s,casefold,project,quota", feature)
+				//feature = fmt.Sprintf("casefold,project,quota")
+				extendOpts = fmt.Sprintf("%s,nodiscard,lazy_journal_init=1,encoding_flags=strict,encoding=utf8-12.1", extendOpts)
+			}
+			if fsFeatures.Ext4.ReservedBlocksPercentage > 0 {
+				featureOpts = append(featureOpts, []string{"-m", fmt.Sprintf("%d", fsFeatures.Ext4.ReservedBlocksPercentage)}...)
+			}
+		}
+		cmd = []string{"mkfs.ext4", "-O", feature, "-E", extendOpts}
+		cmd = append(cmd, featureOpts...)
+		log.Infof("===========format partion cmd: %#v", cmd)
 		/*
 			// see /etc/mke2fs.conf, default inode_ratio is 16384
 			If  this option is is not specified, mke2fs will pick a single default usage type based on the size
@@ -417,8 +491,22 @@ func FormatPartition(path, fs, uuid string) error {
 	// #case fs == "ntfs":
 	// #    cmd = []string{"/sbin/mkfs.ntfs"}
 	case fs == "xfs":
-		cmd = []string{"mkfs.xfs", "-f", "-m", "crc=0", "-i", "projid32bit=0", "-n", "ftype=0"}
+		cmd = []string{"mkfs.xfs", "-f", "-m", "crc=0", "-i", "projid32bit=0", "-n", "ftype=1"}
 		cmdUuid = []string{"xfs_admin", "-U", uuid}
+	case fs == "f2fs":
+		cmd = []string{"mkfs.f2fs", "-U", uuid, "-O"}
+		options := "extra_attr,inode_checksum,sb_checksum"
+		if fsFeatures != nil && fsFeatures.F2Fs.CaseInsensitive {
+			options += ",casefold"
+		}
+		cmd = append(cmd, options)
+		if fsFeatures != nil && fsFeatures.F2Fs.CaseInsensitive {
+			cmd = append(cmd, "-C", "utf8")
+		}
+
+		if fsFeatures != nil && fsFeatures.F2Fs.OverprovisionRatioPercentage > 0 {
+			cmd = append(cmd, "-o", fmt.Sprintf("%d", fsFeatures.F2Fs.OverprovisionRatioPercentage))
+		}
 	}
 
 	if len(cmd) > 0 {
@@ -462,6 +550,63 @@ func DetectIsUEFISupport(rootfs fsdriver.IRootFsDriver, partitions []fsdriver.ID
 	return false
 }
 
+func DetectIsBIOSSupport(partDev string, rootfs fsdriver.IRootFsDriver) bool {
+	fi, err := os.OpenFile(partDev, os.O_RDONLY, 0444)
+	if err != nil {
+		log.Errorf("failed open partdev %s: %s", partDev, err)
+		return false
+	}
+	defer fi.Close()
+
+	// read first sector
+	sector := make([]byte, 512)
+	n, err := fi.Read(sector)
+	if err != nil || n != 512 {
+		log.Errorf("failed read first sector %d %s: %s", n, partDev, err)
+		return false
+	}
+
+	bootSignature := sector[510:512]
+	expectedSignature := []byte{0x55, 0xAA}
+	log.Infof("Detect is bios support bootSignature: %x", bootSignature)
+	if bootSignature[0] != expectedSignature[0] || bootSignature[1] != expectedSignature[1] {
+		return false
+	}
+	partitionType := rootfs.GetPartition().GetPhysicalPartitionType()
+	if partitionType == "mbr" {
+		return true
+	} else if partitionType == "gpt" {
+		/*
+			   Number  Start (sector)    End (sector)  Size       Code  Name
+			      1          227328        83886046   39.9 GiB    8300
+			     14            2048           10239   4.0 MiB     EF02
+			     15           10240          227327   106.0 MiB   EF00
+
+				# EF02 is BIOS Boot partition
+		*/
+		out, err := procutils.NewCommand("sgdisk", "-p", partDev).Output()
+		if err != nil {
+			log.Errorf("sgdisk -p %s failed: %s, %s", partDev, err, out)
+			return false
+		}
+		re := regexp.MustCompile(`^\s*(\d+)\s+(\d+)\s+(\d+)\s+([\d\.]+\s+\w+)\s+(\w+)\s*(.*)$`)
+		scanner := bufio.NewScanner(bytes.NewReader(out))
+		for scanner.Scan() {
+			line := scanner.Text()
+			m := re.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			code := m[5]
+			if code == "EF02" {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func MountRootfs(readonly bool, partitions []fsdriver.IDiskPartition) (fsdriver.IRootFsDriver, error) {
 	errs := []error{}
 	for i := 0; i < len(partitions); i++ {
@@ -487,7 +632,7 @@ func MountRootfs(readonly bool, partitions []fsdriver.IDiskPartition) (fsdriver.
 	}
 	var err error = errors.ErrNotFound
 	if len(errs) > 0 {
-		err = errors.Wrapf(errors.ErrNotFound, errors.NewAggregate(errs).Error())
+		err = errors.Wrapf(errors.ErrNotFound, "%s", errors.NewAggregate(errs).Error())
 	}
 	return nil, err
 }
@@ -516,7 +661,7 @@ func DeployGuestfs(d deploy_iface.IDeployer, req *apis.DeployParams) (res *apis.
 	return ret, nil
 }
 
-func ResizeFs(d deploy_iface.IDeployer) (*apis.Empty, error) {
+func ResizeFs(d deploy_iface.IDeployer, diskId string) (*apis.Empty, error) {
 	unmount := func(root fsdriver.IRootFsDriver) error {
 		err := d.UmountRootfs(root)
 		if err != nil {
@@ -525,10 +670,12 @@ func ResizeFs(d deploy_iface.IDeployer) (*apis.Empty, error) {
 		return nil
 	}
 
+	var rootPartDev string
 	root, err := d.MountRootfs(false)
 	if err != nil && errors.Cause(err) != errors.ErrNotFound {
 		return new(apis.Empty), errors.Wrapf(err, "disk.MountRootfs")
 	} else if err == nil {
+		rootPartDev = root.GetPartition().GetPartDev()
 		if !root.IsResizeFsPartitionSupport() {
 			err := unmount(root)
 			if err != nil {
@@ -543,8 +690,7 @@ func ResizeFs(d deploy_iface.IDeployer) (*apis.Empty, error) {
 			return new(apis.Empty), err
 		}
 	}
-
-	err = d.ResizePartition()
+	err = d.ResizePartition(diskId, rootPartDev)
 	if err != nil {
 		return new(apis.Empty), errors.Wrap(err, "resize disk partition")
 	}
@@ -556,7 +702,7 @@ func FormatFs(d deploy_iface.IDeployer, req *apis.FormatFsParams) (*apis.Empty, 
 	if err != nil {
 		return new(apis.Empty), errors.Wrap(err, "MakePartition")
 	}
-	err = d.FormatPartition(req.FsFormat, req.Uuid)
+	err = d.FormatPartition(req.FsFormat, req.Uuid, req.FsFeatures)
 	if err != nil {
 		return new(apis.Empty), errors.Wrap(err, "FormatPartition")
 	}
@@ -620,6 +766,7 @@ func ProbeImageInfo(d deploy_iface.IDeployer) (*apis.ImageInfo, error) {
 	// multi partition concurrent, so we need umount rootfs first
 	imageInfo.IsUefiSupport = d.DetectIsUEFISupport(rootfs)
 	imageInfo.PhysicalPartitionType = partition.GetPhysicalPartitionType()
+	imageInfo.IsBiosSupport = d.DetectIsBIOSSupport(rootfs)
 	log.Infof("ProbeImageInfo response %s", imageInfo)
 	return imageInfo, nil
 }

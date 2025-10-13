@@ -47,7 +47,7 @@ func GetLvNames(vg string) ([]string, error) {
 	if len(res.Report) != 1 {
 		return nil, errors.Errorf("unexpect res %v", res)
 	}
-	lvNames := make([]string, len(res.Report[0].LV))
+	lvNames := make([]string, 0, len(res.Report[0].LV))
 	for i := 0; i < len(res.Report[0].LV); i++ {
 		lvNames = append(lvNames, res.Report[0].LV[i].LVName)
 	}
@@ -280,10 +280,13 @@ func VgDisplay(vgName string) error {
 	return nil
 }
 
-func VgActive(vgName string, active bool) error {
+func VgActive(vgName string, active, autoActivation bool) error {
 	opts := "-ay"
 	if !active {
 		opts = "-an"
+	}
+	if active && autoActivation {
+		opts = "-aay"
 	}
 	out, err := procutils.NewRemoteCommandAsFarAsPossible("lvm", "vgchange", opts, vgName).Output()
 	if err != nil {

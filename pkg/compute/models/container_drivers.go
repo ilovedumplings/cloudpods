@@ -1,3 +1,17 @@
+// Copyright 2019 Yunion
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package models
 
 import (
@@ -75,10 +89,33 @@ func GetContainerVolumeMountDriverWithError(typ apis.ContainerVolumeMountType) (
 	return getContainerDriverWithError[apis.ContainerVolumeMountType, IContainerVolumeMountDriver](containerVolumeDrivers, typ)
 }
 
+func GetContainerRootFsDriverWithError(typ apis.ContainerVolumeMountType) (IContainerRootFsDriver, error) {
+	return getContainerDriverWithError[apis.ContainerVolumeMountType, IContainerRootFsDriver](containerVolumeDrivers, typ)
+}
+
+func GetContainerRootFsDriver(typ apis.ContainerVolumeMountType) IContainerRootFsDriver {
+	return getContainerDriver[apis.ContainerVolumeMountType, IContainerRootFsDriver](containerVolumeDrivers, typ)
+}
+
 type IContainerVolumeMountDriver interface {
 	GetType() apis.ContainerVolumeMountType
 	ValidatePodCreateData(ctx context.Context, userCred mcclient.TokenCredential, vm *apis.ContainerVolumeMount, input *api.ServerCreateInput) error
 	ValidateCreateData(ctx context.Context, userCred mcclient.TokenCredential, pod *SGuest, vm *apis.ContainerVolumeMount) (*apis.ContainerVolumeMount, error)
+}
+
+type IContainerRootFsDriver interface {
+	IContainerVolumeMountDriver
+
+	ToHostRootFs(rootFs *apis.ContainerRootfs) (*hostapi.ContainerRootfs, error)
+	ValidateRootFsCreateData(ctx context.Context, userCred mcclient.TokenCredential, pod *SGuest, rootFs *apis.ContainerRootfs) error
+}
+
+type IContainerVolumeMountDiskDriver interface {
+	IContainerVolumeMountDriver
+
+	ValidatePostOverlay(ctx context.Context, userCred mcclient.TokenCredential, vm *apis.ContainerVolumeMount) error
+	ValidatePostSingleOverlay(ctx context.Context, userCred mcclient.TokenCredential, pov *apis.ContainerVolumeMountDiskPostOverlay) error
+	ValidatePostOverlayTargetDirs(ovs []*apis.ContainerVolumeMountDiskPostOverlay) error
 }
 
 func RegisterContainerDeviceDriver(drv IContainerDeviceDriver) {

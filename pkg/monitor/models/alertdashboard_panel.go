@@ -25,6 +25,7 @@ var (
 	AlertDashBoardPanelManager *SAlertDashboardPanelManager
 )
 
+// +onecloud:swagger-gen-ignore
 type SAlertDashboardPanelManager struct {
 	db.SJointResourceBaseManager
 }
@@ -46,15 +47,17 @@ func init() {
 	})
 }
 
+// +onecloud:swagger-gen-ignore
 type SAlertDashboardPanel struct {
 	db.SVirtualJointResourceBase
 
 	DashboardId string `width:"36" charset:"ascii" nullable:"false" list:"user" create:"required" index:"true"`
 	PanelId     string `width:"36" charset:"ascii" nullable:"false" list:"user" create:"required" index:"true"`
+	Index       int    `nullable:"true" default:"0" list:"user" create:"optional"`
 }
 
 func (man *SAlertDashboardPanelManager) GetMasterFieldName() string {
-	return "dashboard_Id"
+	return "dashboard_id"
 }
 
 func (man *SAlertDashboardPanelManager) GetSlaveFieldName() string {

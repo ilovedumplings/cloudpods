@@ -265,6 +265,10 @@ func (asc *SASController) Scale(ctx context.Context, userCred mcclient.TokenCred
 			err = scalingActivity.SetReject("", msg)
 			return
 		}
+		if len(nets) == 0 {
+			setFail(scalingActivity, fmt.Sprintf("empty networks '%s' error", sg.Id))
+			return
+		}
 		succeedInstances, err := asc.CreateInstances(ctx, userCred, ownerId, sg, gt, nets[0], num)
 		switch len(succeedInstances) {
 		case 0:
@@ -385,7 +389,7 @@ Loop:
 	log.Debugf("finish all check jobs when removing servers")
 	err = nil
 	if len(failedList) != 0 {
-		err = fmt.Errorf(strings.Join(failedList, "; "))
+		err = fmt.Errorf("%s", strings.Join(failedList, "; "))
 	}
 	instanceRet := make([]SInstance, 0, succeedList.Len())
 	for _, id := range succeedList.UnsortedList() {
@@ -564,7 +568,7 @@ func (asc *SASController) CreateInstances(
 	for _, id := range succeedInstances {
 		instances = append(instances, instanceMap[id])
 	}
-	return instances, fmt.Errorf(failRecord.String())
+	return instances, fmt.Errorf("%s", failRecord.String())
 }
 
 type SCreateRet struct {

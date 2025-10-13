@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	execlient "yunion.io/x/executor/client"
@@ -35,12 +34,13 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/cronman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/cachesync"
+	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
 	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/deployclient"
 	"yunion.io/x/onecloud/pkg/image/drivers/s3"
 	"yunion.io/x/onecloud/pkg/image/models"
 	"yunion.io/x/onecloud/pkg/image/options"
-	_ "yunion.io/x/onecloud/pkg/image/policy"
+	"yunion.io/x/onecloud/pkg/image/policy"
 	_ "yunion.io/x/onecloud/pkg/image/tasks"
 	"yunion.io/x/onecloud/pkg/image/torrent"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
@@ -55,6 +55,7 @@ func StartService() {
 	baseOpts := &opts.BaseOptions
 	dbOpts := &opts.DBOptions
 	common_options.ParseOptions(opts, os.Args, "glance-api.conf", api.SERVICE_TYPE)
+	policy.Init()
 
 	// no need to run glance as root any more
 	// isRoot := sysutils.IsRootPermission()
@@ -67,6 +68,8 @@ func StartService() {
 	})
 
 	common_options.StartOptionManager(opts, opts.ConfigSyncPeriodSeconds, api.SERVICE_TYPE, api.SERVICE_VERSION, options.OnOptionsChange)
+
+	models.InitImageStreamWorkers()
 
 	if opts.PortV2 > 0 {
 		log.Infof("Port V2 %d is specified, use v2 port", opts.PortV2)
@@ -104,10 +107,14 @@ func StartService() {
 	log.Infof("Target image formats %#v", opts.TargetImageFormats)
 
 	if ok, err := hasVmwareAccount(); err != nil {
-		log.Errorf("failed	get vmware cloudaccounts")
+		log.Errorf("failed get vmware cloudaccounts: %v", err)
 	} else if ok {
 		if !utils.IsInStringArray(string(qemuimgfmt.VMDK), options.Options.TargetImageFormats) {
-			options.Options.TargetImageFormats = append(options.Options.TargetImageFormats, string(qemuimgfmt.VMDK))
+			if err = models.UpdateImageConfigTargetImageFormats(context.Background(), auth.AdminCredential()); err != nil {
+				log.Errorf("failed update target_image_formats %s", err)
+			} else {
+				options.Options.TargetImageFormats = append(options.Options.TargetImageFormats, string(qemuimgfmt.VMDK))
+			}
 		}
 	}
 
@@ -132,23 +139,33 @@ func StartService() {
 		deployclient.Init(options.Options.DeployServerSocketPath)
 	}
 
-	if options.Options.StorageDriver == api.IMAGE_STORAGE_DRIVER_S3 {
-		go initS3()
-	} else {
-		// Check the images after everything is ready
-		go models.CheckImages()
-	}
+	go func() {
+		if options.Options.HasValidS3Options() {
+			initS3()
+		}
+		// check image after s3 mounted
+		models.CheckImages()
+	}()
 
 	if !opts.IsSlaveNode {
+		err := taskman.TaskManager.InitializeData()
+		if err != nil {
+			log.Fatalf("TaskManager.InitializeData fail %s", err)
+		}
+
 		cachesync.StartTenantCacheSync(opts.TenantCacheExpireSeconds)
 
-		cron := cronman.InitCronJobManager(true, options.Options.CronJobWorkerCount)
+		cron := cronman.InitCronJobManager(true, options.Options.CronJobWorkerCount, options.Options.TimeZone)
 		cron.AddJobAtIntervals("CleanPendingDeleteImages", time.Duration(options.Options.PendingDeleteCheckSeconds)*time.Second, models.ImageManager.CleanPendingDeleteImages)
 		cron.AddJobAtIntervals("CalculateQuotaUsages", time.Duration(opts.CalculateQuotaUsageIntervalSeconds)*time.Second, models.QuotaManager.CalculateQuotaUsages)
 		cron.AddJobAtIntervals("CleanPendingDeleteGuestImages",
 			time.Duration(options.Options.PendingDeleteCheckSeconds)*time.Second, models.GuestImageManager.CleanPendingDeleteImages)
 
 		cron.AddJobEveryFewHour("AutoPurgeSplitable", 4, 30, 0, db.AutoPurgeSplitable, false)
+
+		cron.AddJobAtIntervalsWithStartRun("TaskCleanupJob", time.Duration(options.Options.TaskArchiveIntervalMinutes)*time.Minute, taskman.TaskManager.TaskCleanupJob, true)
+
+		cron.AddJobAtIntervals("MarkDataImage", time.Duration(options.Options.VerifyImageStatusIntervalMinutes)*time.Minute, models.ImageManager.VerifyActiveImageStatus)
 
 		cron.Start()
 	}
@@ -161,16 +178,16 @@ func StartService() {
 		if options.Options.EnableTorrentService {
 			torrent.StopTorrents()
 		}
-		if options.Options.StorageDriver == api.IMAGE_STORAGE_DRIVER_S3 {
-			procutils.NewCommand("umount", options.Options.S3MountPoint).Run()
-		}
+		//if options.Options.StorageDriver == api.IMAGE_STORAGE_DRIVER_S3 {
+		//	procutils.NewCommand("umount", options.Options.S3MountPoint).Run()
+		//}
 	})
 }
 
 func hasVmwareAccount() (bool, error) {
 	q := jsonutils.NewDict()
 	q.Add(jsonutils.NewString("system"), "scope")
-	q.Add(jsonutils.NewString("brand"), "VMware")
+	q.Add(jsonutils.NewString("VMware"), "brand")
 	res, err := compute.Cloudaccounts.List(auth.GetAdminSession(context.Background(), options.Options.Region), q)
 	if err != nil {
 		return false, err
@@ -179,20 +196,13 @@ func hasVmwareAccount() (bool, error) {
 }
 
 func initS3() {
-	url := options.Options.S3Endpoint
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		prefix := "http://"
-		if options.Options.S3UseSSL {
-			prefix = "https://"
-		}
-		url = prefix + url
-	}
 	err := s3.Init(
-		url,
+		options.Options.S3Endpoint,
 		options.Options.S3AccessKey,
 		options.Options.S3SecretKey,
 		options.Options.S3BucketName,
 		options.Options.S3UseSSL,
+		options.Options.S3SignVersion,
 	)
 	if err != nil {
 		log.Fatalf("failed init s3 client %s", err)
@@ -232,7 +242,7 @@ func initS3() {
 
 	out, err := procutils.NewCommand("s3fs",
 		options.Options.S3BucketName, options.Options.S3MountPoint,
-		"-o", fmt.Sprintf("passwd_file=/tmp/s3-pass,use_path_request_style,url=%s", url)).Output()
+		"-o", fmt.Sprintf("passwd_file=/tmp/s3-pass,use_path_request_style,url=%s", s3.GetEndpoint(options.Options.S3Endpoint, options.Options.S3UseSSL))).Output()
 	if err != nil {
 		log.Fatalf("failed mount s3fs %s %s", err, out)
 	}
@@ -246,7 +256,4 @@ func initS3() {
 			break
 		}
 	}
-
-	// check image after s3 mounted
-	models.CheckImages()
 }

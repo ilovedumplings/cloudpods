@@ -29,7 +29,6 @@ package aliyun
 
 import (
 	"fmt"
-	"strings"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
@@ -103,16 +102,11 @@ func (self *SStorage) GetIDisks() ([]cloudprovider.ICloudDisk, error) {
 }
 
 func (self *SStorage) GetStorageType() string {
-	//return models.STORAGE_PUBLIC_CLOUD
 	return self.storageType
 }
 
 func (self *SStorage) GetMediumType() string {
-	if strings.Contains(self.storageType, "_ssd") {
-		return api.DISK_TYPE_SSD
-	} else {
-		return api.DISK_TYPE_ROTATE
-	}
+	return api.DISK_TYPE_SSD
 }
 
 func (self *SStorage) GetCapacityMB() int64 {
@@ -148,8 +142,8 @@ func (self *SStorage) GetIStoragecache() cloudprovider.ICloudStoragecache {
 	return self.zone.region.getStoragecache()
 }
 
-func (self *SStorage) CreateIDisk(conf *cloudprovider.DiskCreateConfig) (cloudprovider.ICloudDisk, error) {
-	diskId, err := self.zone.region.CreateDisk(self.zone.ZoneId, self.storageType, conf.Name, conf.SizeGb, conf.Desc, conf.ProjectId)
+func (self *SStorage) CreateIDisk(opts *cloudprovider.DiskCreateConfig) (cloudprovider.ICloudDisk, error) {
+	diskId, err := self.zone.region.CreateDisk(self.zone.ZoneId, self.storageType, opts)
 	if err != nil {
 		return nil, errors.Wrapf(err, "CreateDisk")
 	}

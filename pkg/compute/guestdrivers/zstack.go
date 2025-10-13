@@ -77,6 +77,7 @@ func (self *SZStackGuestDriver) GetStorageTypes() []string {
 	return []string{
 		api.STORAGE_ZSTACK_LOCAL_STORAGE,
 		api.STORAGE_ZSTACK_CEPH,
+		api.STORAGE_ZSTACK_SHARED_BLOCK,
 	}
 }
 
@@ -100,7 +101,7 @@ func (self *SZStackGuestDriver) GetRebuildRootStatus() ([]string, error) {
 	return []string{api.VM_READY}, nil
 }
 
-func (self *SZStackGuestDriver) GetChangeConfigStatus(guest *models.SGuest) ([]string, error) {
+func (self *SZStackGuestDriver) GetChangeInstanceTypeStatus() ([]string, error) {
 	return []string{api.VM_READY, api.VM_RUNNING}, nil
 }
 

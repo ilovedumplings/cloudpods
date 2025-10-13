@@ -31,20 +31,7 @@ import (
 )
 
 func (self *SCloudregion) purgeAll(ctx context.Context, managerId string) error {
-	zones, err := self.GetZones()
-	if err != nil {
-		return errors.Wrapf(err, "GetZones")
-	}
-	for i := range zones {
-		lockman.LockObject(ctx, &zones[i])
-		defer lockman.ReleaseObject(ctx, &zones[i])
-
-		err = zones[i].purgeAll(ctx, managerId)
-		if err != nil {
-			return errors.Wrapf(err, "zone purgeAll %s", zones[i].Name)
-		}
-	}
-	err = self.purgeAccessGroups(ctx, managerId)
+	err := self.purgeAccessGroups(ctx, managerId)
 	if err != nil {
 		return errors.Wrapf(err, "purgeAccessGroups")
 	}
@@ -75,6 +62,25 @@ func (self *SCloudregion) purgeAll(ctx context.Context, managerId string) error 
 	err = self.purgeResources(ctx, managerId)
 	if err != nil {
 		return errors.Wrapf(err, "purgeResources")
+	}
+	err = self.purgeQuotas(ctx, managerId)
+	if err != nil {
+		return errors.Wrapf(err, "purgeQuotas")
+	}
+
+	// fix #20036 避免regional子网未删除, 导致zone残留
+	zones, err := self.GetZones()
+	if err != nil {
+		return errors.Wrapf(err, "GetZones")
+	}
+	for i := range zones {
+		lockman.LockObject(ctx, &zones[i])
+		defer lockman.ReleaseObject(ctx, &zones[i])
+
+		err = zones[i].purgeAll(ctx, managerId)
+		if err != nil {
+			return errors.Wrapf(err, "zone purgeAll %s", zones[i].Name)
+		}
 	}
 
 	cprCount, err := CloudproviderRegionManager.Query().Equals("cloudregion_id", self.Id).NotEquals("cloudprovider_id", managerId).CountWithError()
@@ -266,6 +272,20 @@ func (self *SNatGateway) purge(ctx context.Context, userCred mcclient.TokenCrede
 	return self.SInfrasResourceBase.Delete(ctx, userCred)
 }
 
+func (self *SCloudregion) purgeQuotas(ctx context.Context, managerId string) error {
+	quotas := CloudproviderQuotaManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
+	pairs := []purgePair{
+		{manager: CloudproviderQuotaManager, key: "id", q: quotas},
+	}
+	for i := range pairs {
+		err := pairs[i].purgeAll(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (self *SCloudregion) purgeResources(ctx context.Context, managerId string) error {
 	buckets := BucketManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
 	ess := ElasticSearchManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
@@ -282,16 +302,16 @@ func (self *SCloudregion) purgeResources(ctx context.Context, managerId string) 
 	snapshots := SnapshotManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
 	tables := TablestoreManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
 	wafs := WafInstanceManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
-	ipsetcaches := WafIPSetCacheManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
-	regsetcaches := WafRegexSetCacheManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
-	wafgroups := WafRuleGroupCacheManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
+	ipsets := WafIPSetManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
+	regsets := WafRegexSetManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
+	wafgroups := WafRuleGroupManager.Query("id").Equals("manager_id", managerId).Equals("cloudregion_id", self.Id)
 	cprs := CloudproviderRegionManager.Query("row_id").Equals("cloudprovider_id", managerId).Equals("cloudregion_id", self.Id)
 
 	pairs := []purgePair{
 		{manager: CloudproviderRegionManager, key: "row_id", q: cprs},
-		{manager: WafRuleGroupCacheManager, key: "id", q: wafgroups},
-		{manager: WafRegexSetCacheManager, key: "id", q: regsetcaches},
-		{manager: WafIPSetCacheManager, key: "id", q: ipsetcaches},
+		{manager: WafRuleGroupManager, key: "id", q: wafgroups},
+		{manager: WafRegexSetManager, key: "id", q: regsets},
+		{manager: WafIPSetManager, key: "id", q: ipsets},
 		{manager: WafInstanceManager, key: "id", q: wafs},
 		{manager: TablestoreManager, key: "id", q: tables},
 		{manager: SnapshotManager, key: "id", q: snapshots},
@@ -672,6 +692,7 @@ func (self *SZone) purgeHosts(ctx context.Context, managerId string) error {
 	hosts := HostManager.Query("id").Equals("manager_id", managerId).Equals("zone_id", self.Id)
 	isolateds := IsolatedDeviceManager.Query("id").In("host_id", hosts.SubQuery())
 	hoststorages := HoststorageManager.Query("row_id").In("host_id", hosts.SubQuery())
+	hostbackupStorages := HostBackupstorageManager.Query("row_id").In("host_id", hosts.SubQuery())
 	hostwires := HostwireManagerDeprecated.Query("row_id").In("host_id", hosts.SubQuery())
 	guests := GuestManager.Query("id").In("host_id", hosts.SubQuery())
 	guestdisks := GuestdiskManager.Query("row_id").In("guest_id", guests.SubQuery())
@@ -720,6 +741,7 @@ func (self *SZone) purgeHosts(ctx context.Context, managerId string) error {
 		{manager: InstanceBackupManager, key: "id", q: instancebackups},
 		{manager: GuestManager, key: "id", q: guests},
 		{manager: HoststorageManager, key: "row_id", q: hoststorages},
+		{manager: HostBackupstorageManager, key: "row_id", q: hostbackupStorages},
 		{manager: HostwireManagerDeprecated, key: "row_id", q: hostwires},
 		{manager: IsolatedDeviceManager, key: "id", q: isolateds},
 		{manager: HostManager, key: "id", q: hosts},
@@ -736,6 +758,7 @@ func (self *SZone) purgeHosts(ctx context.Context, managerId string) error {
 func (self *SHost) purge(ctx context.Context, userCred mcclient.TokenCredential) error {
 	isolateds := IsolatedDeviceManager.Query("id").Equals("host_id", self.Id)
 	hoststorages := HoststorageManager.Query("row_id").Equals("host_id", self.Id)
+	hostbackupStorages := HostBackupstorageManager.Query("row_id").Equals("host_id", self.Id)
 	hostwires := HostwireManagerDeprecated.Query("row_id").Equals("host_id", self.Id)
 	guests := GuestManager.Query("id").Equals("host_id", self.Id)
 	guestdisks := GuestdiskManager.Query("row_id").In("guest_id", guests.SubQuery())
@@ -776,6 +799,7 @@ func (self *SHost) purge(ctx context.Context, userCred mcclient.TokenCredential)
 		{manager: InstanceBackupManager, key: "id", q: instancebackups},
 		{manager: GuestManager, key: "id", q: guests},
 		{manager: HoststorageManager, key: "row_id", q: hoststorages},
+		{manager: HostBackupstorageManager, key: "row_id", q: hostbackupStorages},
 		{manager: HostwireManagerDeprecated, key: "row_id", q: hostwires},
 		{manager: IsolatedDeviceManager, key: "id", q: isolateds},
 	}
@@ -794,6 +818,8 @@ func (self *SHost) purge(ctx context.Context, userCred mcclient.TokenCredential)
 func (self *SGuest) purge(ctx context.Context, userCred mcclient.TokenCredential) error {
 	guestdisks := GuestdiskManager.Query("row_id").Equals("guest_id", self.Id)
 	guestnetworks := GuestnetworkManager.Query("row_id").Equals("guest_id", self.Id)
+	// 辅助IP
+	networkaddress := NetworkAddressManager.Query("id").In("parent_id", guestnetworks.SubQuery())
 	guestcdroms := GuestcdromManager.Query("row_id").Equals("id", self.Id)
 	guestvfd := GuestFloppyManager.Query("row_id").Equals("id", self.Id)
 	guestgroups := GroupguestManager.Query("row_id").Equals("guest_id", self.Id)
@@ -817,6 +843,7 @@ func (self *SGuest) purge(ctx context.Context, userCred mcclient.TokenCredential
 		{manager: GroupguestManager, key: "row_id", q: guestgroups},
 		{manager: GuestcdromManager, key: "row_id", q: guestcdroms},
 		{manager: GuestFloppyManager, key: "row_id", q: guestvfd},
+		{manager: NetworkAddressManager, key: "id", q: networkaddress},
 		{manager: GuestnetworkManager, key: "row_id", q: guestnetworks},
 		{manager: GuestdiskManager, key: "row_id", q: guestdisks},
 		// {manager: InstanceSnapshotManager, key: "id", q: instancesnapshots},
@@ -894,8 +921,12 @@ func (cprvd *SCloudprovider) purge(ctx context.Context, userCred mcclient.TokenC
 	dnszones := DnsZoneManager.Query("id").Equals("manager_id", cprvd.Id)
 	records := DnsRecordManager.Query("id").In("dns_zone_id", dnszones.SubQuery())
 	dnsVpcs := DnsZoneVpcManager.Query("row_id").In("dns_zone_id", dnszones.SubQuery())
+	ssls := SSLCertificateManager.Query("id").Equals("manager_id", cprvd.Id)
+	quotas := CloudproviderQuotaManager.Query("id").Equals("manager_id", cprvd.Id)
 
 	pairs := []purgePair{
+		{manager: CloudproviderQuotaManager, key: "id", q: quotas},
+		{manager: SSLCertificateManager, key: "id", q: ssls},
 		{manager: DnsZoneVpcManager, key: "row_id", q: dnsVpcs},
 		{manager: DnsRecordManager, key: "id", q: records},
 		{manager: DnsZoneManager, key: "id", q: dnszones},

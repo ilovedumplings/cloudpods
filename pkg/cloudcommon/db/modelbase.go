@@ -24,6 +24,7 @@ import (
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/gotypes"
 	"yunion.io/x/pkg/object"
 	"yunion.io/x/pkg/util/rbacscope"
 	"yunion.io/x/pkg/util/version"
@@ -228,6 +229,10 @@ func (manager *SModelBaseManager) QueryDistinctExtraField(q *sqlchemy.SQuery, fi
 	return q, httperrors.ErrNotFound
 }
 
+func (manager *SModelBaseManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	return q, httperrors.ErrNotImplemented
+}
+
 func (manager *SModelBaseManager) CustomizeFilterList(ctx context.Context, q *sqlchemy.SQuery, userCred mcclient.TokenCredential, query jsonutils.JSONObject) (*CustomizeListFilters, error) {
 	return NewCustomizeListFilters(), nil
 }
@@ -394,14 +399,11 @@ func (manager *SModelBaseManager) ResourceScope() rbacscope.TRbacScope {
 	return rbacscope.ScopeSystem
 }
 
-func (manager *SModelBaseManager) AllowGetPropertyDistinctField(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject) bool {
-	return true
-}
-
 func (manager *SModelBaseManager) GetPagingConfig() *SPagingConfig {
 	return nil
 }
 
+// +onecloud:swagger-gen-ignore
 func (manager *SModelBaseManager) GetPropertyDistinctField(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	im, ok := manager.GetVirtualObject().(IModelManager)
 	if !ok {
@@ -480,6 +482,95 @@ func (manager *SModelBaseManager) GetPropertyDistinctField(ctx context.Context, 
 	return res, nil
 }
 
+// +onecloud:swagger-gen-ignore
+func (manager *SModelBaseManager) GetPropertyDistinctFields(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject) (jsonutils.JSONObject, error) {
+	im, ok := manager.GetVirtualObject().(IModelManager)
+	if !ok {
+		im = manager
+	}
+	input := &apis.DistinctFieldsInput{}
+	query.Unmarshal(input)
+	if len(input.Field) == 0 && (len(input.ExtraResource) == 0 || len(input.ExtraField) == 0) {
+		return nil, httperrors.NewMissingParameterError("field")
+	}
+	// validate field
+	for _, fd := range input.Field {
+		var hasField = false
+		for _, field := range manager.getTable().Fields() {
+			if field.Name() == fd {
+				hasField = true
+				break
+			}
+		}
+		if !hasField {
+			return nil, httperrors.NewBadRequestError("model has no field %s", fd)
+		}
+	}
+	var err error
+	q := im.Query()
+	q, err = ListItemQueryFilters(im, ctx, q, userCred, query, policy.PolicyActionList)
+	if err != nil {
+		return nil, err
+	}
+	result := jsonutils.NewDict()
+	fields := jsonutils.NewArray()
+	if len(input.Field) > 0 {
+		sq := q.Copy().ResetFields()
+		// query field
+		for i := 0; i < len(input.Field); i++ {
+			sq = sq.AppendField(sq.Field(input.Field[i]))
+		}
+		rows, err := sq.Distinct().Rows()
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			mMap, err := sq.Row2Map(rows)
+			if err != nil {
+				return nil, errors.Wrapf(err, "Row2Map")
+			}
+			fields.Add(jsonutils.Marshal(mMap))
+		}
+	}
+	result.Set("fields", fields)
+
+	extraFields := jsonutils.NewArray()
+	if len(input.ExtraResource) > 0 && len(input.ExtraField) > 0 {
+		// query extra field
+		sq := q.Copy().ResetFields()
+		em := GetModelManager(input.ExtraResource)
+		if gotypes.IsNil(em) {
+			return nil, httperrors.NewInputParameterError("invalid extra_resource %s", input.ExtraResource)
+		}
+		for _, field := range input.ExtraField {
+			if gotypes.IsNil(em.TableSpec().ColumnSpec(field)) {
+				return nil, httperrors.NewInputParameterError("resource %s does not have field %s", input.ExtraResource, field)
+			}
+		}
+		sq, err := im.QueryDistinctExtraFields(sq, input.ExtraResource, input.ExtraField)
+		if err != nil {
+			return nil, err
+		}
+
+		rows, err := sq.Distinct().Rows()
+		if err != nil {
+			return nil, err
+		}
+
+		defer rows.Close()
+		for rows.Next() {
+			mMap, err := sq.Row2Map(rows)
+			if err != nil {
+				return nil, errors.Wrapf(err, "Row2Map")
+			}
+			extraFields.Add(jsonutils.Marshal(mMap))
+		}
+	}
+	result.Set("extra_fields", extraFields)
+	return result, nil
+}
+
 func (manager *SModelBaseManager) BatchPreValidate(
 	ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider,
 	query jsonutils.JSONObject, data *jsonutils.JSONDict, count int,
@@ -499,6 +590,7 @@ func (manager *SModelBaseManager) GetI18N(ctx context.Context, idstr string, res
 	return nil
 }
 
+// +onecloud:swagger-gen-ignore
 func (manager *SModelBaseManager) GetPropertySplitable(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	stable := manager.GetIModelManager().GetImmutableInstance(ctx, userCred, query).GetSplitTable()
 	if stable == nil {
@@ -531,6 +623,7 @@ func (manager *SModelBaseManager) GetPropertySplitable(ctx context.Context, user
 	return jsonutils.Marshal(metas), nil
 }
 
+// +onecloud:swagger-gen-ignore
 func (manager *SModelBaseManager) GetPropertySplitableExport(ctx context.Context, userCred mcclient.TokenCredential, input apis.SplitTableExportInput) (jsonutils.JSONObject, error) {
 	splitable := manager.GetIModelManager().GetImmutableInstance(ctx, userCred, jsonutils.Marshal(input)).GetSplitTable()
 	if splitable == nil {
@@ -566,6 +659,7 @@ func (manager *SModelBaseManager) GetPropertySplitableExport(ctx context.Context
 	return nil, httperrors.NewResourceNotFoundError("table %s not found", input.Table)
 }
 
+// +onecloud:swagger-gen-ignore
 func (manager *SModelBaseManager) PerformPurgeSplitable(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PurgeSplitTableInput) (jsonutils.JSONObject, error) {
 	splitable := manager.GetIModelManager().GetImmutableInstance(ctx, userCred, query).GetSplitTable()
 	if splitable == nil {
@@ -785,5 +879,9 @@ func NewEmptyExtraHook() *SEmptyExtraHook {
 }
 
 func (e SEmptyExtraHook) AfterPostCreate(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, model IModel, query jsonutils.JSONObject, data jsonutils.JSONObject) error {
+	return nil
+}
+
+func (e SEmptyExtraHook) AfterPostDelete(ctx context.Context, userCred mcclient.TokenCredential, model IModel, query jsonutils.JSONObject) error {
 	return nil
 }

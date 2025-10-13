@@ -54,6 +54,8 @@ func init() {
 	registry.RegisterService(MetricMeasurementManager)
 }
 
+// +onecloud:swagger-gen-model-singular=metricmeasurement
+// +onecloud:swagger-gen-model-plural=metricmeasurements
 type SMetricMeasurementManager struct {
 	db.SEnabledResourceBaseManager
 	db.SStatusStandaloneResourceBaseManager
@@ -381,10 +383,20 @@ func (manager *SMetricMeasurementManager) getMeasurementsFromDB() ([]monitor.Inf
 	}
 	ret := make([]monitor.InfluxMeasurement, len(ms))
 	for i := range ms {
+		m := ms[i]
+		fields, _ := m.getFields()
+		if len(fields) == 0 {
+			continue
+		}
+		fieldsKey := make([]string, len(fields))
+		for i, field := range fields {
+			fieldsKey[i] = field.Name
+		}
 		ret[i] = monitor.InfluxMeasurement{
-			Database:    ms[i].Database,
-			Measurement: ms[i].Name,
-			ResType:     ms[i].ResType,
+			Database:    m.Database,
+			Measurement: m.Name,
+			ResType:     m.ResType,
+			FieldKey:    fieldsKey,
 		}
 	}
 	return ret, nil

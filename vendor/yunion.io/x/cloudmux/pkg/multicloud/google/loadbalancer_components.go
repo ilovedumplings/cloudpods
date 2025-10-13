@@ -57,10 +57,8 @@ type SForwardingRule struct {
 	BackendService      string   `json:"backendService"`
 }
 
-//
-//type STargetProxy struct {
-//}
-//
+// type STargetProxy struct {
+// }
 type SBackendServices struct {
 	SResourceBase
 
@@ -116,6 +114,17 @@ type STargetHttpsProxy struct {
 	AuthorizationPolicy string   `json:"authorizationPolicy"`
 	Fingerprint         string   `json:"fingerprint"`
 	Kind                string   `json:"kind"`
+}
+
+type STargetTcpProxy struct {
+	SResourceBase
+
+	Kind              string `json:"kind"`
+	CreationTimestamp string `json:"creationTimestamp"`
+	Description       string `json:"description"`
+	Service           string `json:"service"`
+	Region            string `json:"region"`
+	ProxyBind         bool   `json:"proxyBind"`
 }
 
 type SInstanceGroup struct {
@@ -550,15 +559,15 @@ func (self *SLoadbalancer) GetForwardingRules() ([]SForwardingRule, error) {
 
 	targets := make([]string, 0)
 	for i := range hps {
-		targets = append(targets, fmt.Sprintf(`(target="%s")`, hps[i].GetId()))
+		targets = append(targets, fmt.Sprintf(`(target = "%s")`, hps[i].SelfLink))
 	}
 
 	for i := range hsps {
-		targets = append(targets, fmt.Sprintf(`(target="%s")`, hsps[i].GetId()))
+		targets = append(targets, fmt.Sprintf(`(target = "%s")`, hsps[i].SelfLink))
 	}
 
-	if strings.Contains(self.GetId(), "/backendServices/") {
-		targets = append(targets, fmt.Sprintf(`(backendService="%s")`, self.GetId()))
+	if strings.Contains(self.SelfLink, "/backendServices/") {
+		targets = append(targets, fmt.Sprintf(`(backendService = "%s")`, self.SelfLink))
 	}
 
 	if len(targets) == 0 {

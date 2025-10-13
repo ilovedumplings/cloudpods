@@ -29,6 +29,7 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-ignore
 type SGroupnetworkManager struct {
 	SGroupJointsManager
 	SNetworkResourceBaseManager
@@ -51,6 +52,7 @@ func init() {
 	})
 }
 
+// +onecloud:model-api-gen
 type SGroupnetwork struct {
 	SGroupJointsBase
 
@@ -62,7 +64,7 @@ type SGroupnetwork struct {
 	// IPv6地址
 	Ip6Addr string `width:"64" charset:"ascii" nullable:"true" list:"user" create:"optional"` // Column(VARCHAR(64, charset='ascii'), nullable=True)
 
-	Index int8 `nullable:"false" default:"0" list:"user" list:"user" update:"user" create:"optional"` // Column(TINYINT, nullable=False, default=0)
+	Index int8 `nullable:"false" default:"0" list:"user" update:"user" create:"optional"` // Column(TINYINT, nullable=False, default=0)
 
 	EipId string `width:"36" charset:"ascii" nullable:"true" list:"user"` // Column(VARCHAR(36, charset='ascii'), nullable=True)
 }

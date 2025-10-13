@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"time"
 
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
@@ -53,7 +54,7 @@ func (self *GuacamoleTunnel) ReadOne() (*Instruction, error) {
 				return nil, InvalidInstruction
 			}
 			return instruct, nil
-		default:
+		case <-time.After(1 * time.Second):
 		}
 	}
 }
@@ -132,7 +133,7 @@ func (self *GuacamoleTunnel) Handshake() error {
 	}
 
 	if args.Opcode != "args" {
-		return errors.Wrapf(InvalidInstruction, args.String())
+		return errors.Wrapf(InvalidInstruction, "%v", args.String())
 	}
 
 	for i, arg := range args.Args {
@@ -171,7 +172,7 @@ func (self *GuacamoleTunnel) Handshake() error {
 	}
 
 	if ready.Opcode != "ready" {
-		return errors.Wrapf(InvalidInstruction, ready.String())
+		return errors.Wrapf(InvalidInstruction, "%v", ready.String())
 	}
 
 	if len(ready.Args) == 0 {

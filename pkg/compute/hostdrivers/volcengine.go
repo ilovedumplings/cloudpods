@@ -44,6 +44,10 @@ func (self *SVolcengineHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_VOLCENGINE
 }
 
+func (self *SVolcengineHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_VOLCENGINE
+}
+
 func (self *SVolcengineHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	if sizeGb%10 != 0 {
 		return fmt.Errorf("The disk size must be a multiple of 10Gb")
@@ -66,7 +70,7 @@ func (self *SVolcengineHostDriver) ValidateDiskSize(storage *models.SStorage, si
 func (self *SVolcengineHostDriver) ValidateResetDisk(ctx context.Context, userCred mcclient.TokenCredential, disk *models.SDisk, snapshot *models.SSnapshot, guests []models.SGuest, input *api.DiskResetInput) (*api.DiskResetInput, error) {
 	for _, guest := range guests {
 		if !utils.IsInStringArray(guest.Status, []string{api.VM_RUNNING, api.VM_READY}) {
-			return nil, httperrors.NewBadGatewayError("Volcengine reset disk required guest status is running or read")
+			return nil, httperrors.NewBadGatewayError("Volcengine reset disk required guest status is running or ready")
 		}
 	}
 	return input, nil
@@ -77,5 +81,5 @@ func (self *SVolcengineHostDriver) RequestDeleteSnapshotWithStorage(ctx context.
 }
 
 func (driver *SVolcengineHostDriver) GetStoragecacheQuota(host *models.SHost) int {
-	return 10
+	return -1
 }

@@ -157,7 +157,9 @@ func (self *SBaseResources) increment(ctx context.Context) error {
 		"order_by.1": "imported_at",
 		"order":      "asc",
 		"filter.0":   timeFilter,
-		"filter.1":   "external_id.isnotempty()",
+	}
+	if self.manager.GetKeyword() != compute.Cloudproviders.GetKeyword() {
+		query["filter.1"] = "external_id.isnotempty()"
 	}
 	if self.manager.GetKeyword() == compute.Hosts.GetKeyword() {
 		query["cloud_env"] = "private_or_onpremise"
@@ -220,8 +222,11 @@ func (self *SBaseResources) decrement(ctx context.Context) error {
 		"delete":     "all",
 		"@deleted":   "true",
 		"filter.0":   timeFilter,
-		"filter.1":   "external_id.isnotempty()",
 	}
+	if self.manager.GetKeyword() != compute.Cloudproviders.GetKeyword() {
+		query["filter.1"] = "external_id.isnotempty()"
+	}
+
 	if self.manager.GetKeyword() == compute.Hosts.GetKeyword() {
 		query["cloud_env"] = "private_or_onpremise"
 	}
@@ -279,8 +284,11 @@ func (self *SBaseResources) update(ctx context.Context) error {
 		"order":          "asc",
 		"pending_delete": "all",
 		"filter.0":       timeFilter,
-		"filter.1":       "external_id.isnotempty()",
 	}
+	if self.manager.GetKeyword() != compute.Cloudproviders.GetKeyword() {
+		query["filter.1"] = "external_id.isnotempty()"
+	}
+
 	if self.manager.GetKeyword() == compute.Hosts.GetKeyword() {
 		query["cloud_env"] = "private_or_onpremise"
 	}
@@ -447,10 +455,16 @@ func (self *SResources) Init(ctx context.Context, userCred mcclient.TokenCredent
 	}
 }
 
+var incrementSync = false
+
 func (self *SResources) IncrementSync(ctx context.Context, userCred mcclient.TokenCredential, isStart bool) {
-	if isStart {
+	if isStart || incrementSync {
 		return
 	}
+	incrementSync = true
+	defer func() {
+		incrementSync = false
+	}()
 	err := func() error {
 		errs := []error{}
 		err := self.Cloudaccounts.increment(ctx)
@@ -516,10 +530,16 @@ func (self *SResources) IncrementSync(ctx context.Context, userCred mcclient.Tok
 	}
 }
 
+var decrementSync = false
+
 func (self *SResources) DecrementSync(ctx context.Context, userCred mcclient.TokenCredential, isStart bool) {
-	if isStart {
+	if isStart || decrementSync {
 		return
 	}
+	decrementSync = true
+	defer func() {
+		decrementSync = false
+	}()
 	err := func() error {
 		errs := []error{}
 		err := self.Cloudaccounts.decrement(ctx)
@@ -585,10 +605,16 @@ func (self *SResources) DecrementSync(ctx context.Context, userCred mcclient.Tok
 	}
 }
 
+var updateSync = false
+
 func (self *SResources) UpdateSync(ctx context.Context, userCred mcclient.TokenCredential, isStart bool) {
-	if isStart {
+	if isStart || updateSync {
 		return
 	}
+	updateSync = true
+	defer func() {
+		updateSync = false
+	}()
 	err := func() error {
 		errs := []error{}
 		err := self.Cloudaccounts.update(ctx)
@@ -672,7 +698,9 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 			succ := true
 			msgs := make([]string, 0)
 			defer func() {
-				logclient.AddActionLogWithContext(ctx, &sMetricProvider{manager}, logclient.ACT_COLLECT_METRICS, strings.Join(msgs, ";"), userCred, succ)
+				if len(msgs) > 0 {
+					logclient.AddActionLogWithContext(ctx, &sMetricProvider{manager}, logclient.ACT_COLLECT_METRICS, strings.Join(msgs, ";"), userCred, succ)
+				}
 				wg.Done()
 				<-ch
 			}()
@@ -680,7 +708,6 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 			if strings.Contains(strings.ToLower(options.Options.SkipMetricPullProviders), strings.ToLower(manager.Provider)) {
 				logmsg := fmt.Sprintf("skip %s metric pull with options: %s", manager.Provider, options.Options.SkipMetricPullProviders)
 				log.Infoln(logmsg)
-				msgs = append(msgs, logmsg)
 				return
 			}
 
@@ -696,7 +723,6 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 			if !driver.IsSupportMetrics() {
 				logmsg := fmt.Sprintf("%s not support metrics, skip", driver.GetProvider())
 				log.Infoln(logmsg)
-				msgs = append(msgs, logmsg)
 				return
 			}
 
@@ -745,7 +771,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 				err = driver.CollectServerMetrics(ctx, manager, provider, servers, startTime, endTime)
 				if err != nil && errors.Cause(err) != cloudprovider.ErrNotImplemented && errors.Cause(err) != cloudprovider.ErrNotSupported {
 					logmsg := fmt.Sprintf("CollectServerMetrics for %s(%s) error: %v", manager.Name, manager.Provider, err)
-					log.Errorf(logmsg)
+					log.Errorf("%s", logmsg)
 					msgs = append(msgs, logmsg)
 					succ = false
 				}
@@ -765,7 +791,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 				err = driver.CollectHostMetrics(ctx, manager, provider, hosts, startTime, endTime)
 				if err != nil && errors.Cause(err) != cloudprovider.ErrNotImplemented && errors.Cause(err) != cloudprovider.ErrNotSupported {
 					logmsg := fmt.Sprintf("CollectHostMetrics for %s(%s) error: %v", manager.Name, manager.Provider, err)
-					log.Errorln(logmsg)
+					log.Errorf("%s", logmsg)
 					msgs = append(msgs, logmsg)
 					succ = false
 				}
@@ -776,7 +802,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 			err = jsonutils.Update(&storages, resources)
 			if err != nil {
 				logmsg := fmt.Sprintf("unmarsha storage resources error: %v", err)
-				log.Errorln(logmsg)
+				log.Errorf("%s", logmsg)
 				msgs = append(msgs, logmsg)
 				succ = false
 			}
@@ -784,7 +810,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 				err = driver.CollectStorageMetrics(ctx, manager, provider, storages, startTime, endTime)
 				if err != nil && errors.Cause(err) != cloudprovider.ErrNotImplemented && errors.Cause(err) != cloudprovider.ErrNotSupported {
 					logmsg := fmt.Sprintf("CollectStorageMetrics for %s(%s) error: %v", manager.Name, manager.Provider, err)
-					log.Errorln(logmsg)
+					log.Errorf("%s", logmsg)
 					msgs = append(msgs, logmsg)
 					succ = false
 				}
@@ -795,7 +821,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 			err = jsonutils.Update(&caches, resources)
 			if err != nil {
 				logmsg := fmt.Sprintf("unmarsha redis resources error: %v", err)
-				log.Errorln(logmsg)
+				log.Errorf("%s", logmsg)
 				msgs = append(msgs, logmsg)
 				succ = false
 			}
@@ -804,7 +830,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 				err = driver.CollectRedisMetrics(ctx, manager, provider, caches, startTime, endTime)
 				if err != nil && errors.Cause(err) != cloudprovider.ErrNotImplemented && errors.Cause(err) != cloudprovider.ErrNotSupported {
 					logmsg := fmt.Sprintf("CollectRedisMetrics for %s(%s) error: %v", manager.Name, manager.Provider, err)
-					log.Errorf(logmsg)
+					log.Errorf("%s", logmsg)
 					msgs = append(msgs, logmsg)
 					succ = false
 				}
@@ -815,7 +841,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 			err = jsonutils.Update(&lbs, resources)
 			if err != nil {
 				logmsg := fmt.Sprintf("unmarsha lb resources error: %v", err)
-				log.Errorln(logmsg)
+				log.Errorf("%s", logmsg)
 				msgs = append(msgs, logmsg)
 				succ = false
 			}
@@ -824,7 +850,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 				err = driver.CollectLoadbalancerMetrics(ctx, manager, provider, lbs, startTime, endTime)
 				if err != nil && errors.Cause(err) != cloudprovider.ErrNotImplemented && errors.Cause(err) != cloudprovider.ErrNotSupported {
 					logmsg := fmt.Sprintf("CollectLoadbalancerMetrics for %s(%s) error: %v", manager.Name, manager.Provider, err)
-					log.Errorf(logmsg)
+					log.Errorf("%s", logmsg)
 					msgs = append(msgs, logmsg)
 					succ = false
 				}
@@ -835,7 +861,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 			err = jsonutils.Update(&buckets, resources)
 			if err != nil {
 				logmsg := fmt.Sprintf("unmarsha bucket resources error: %v", err)
-				log.Errorln(logmsg)
+				log.Errorf("%s", logmsg)
 				msgs = append(msgs, logmsg)
 				succ = false
 			}
@@ -844,7 +870,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 				err = driver.CollectBucketMetrics(ctx, manager, provider, buckets, startTime, endTime)
 				if err != nil && errors.Cause(err) != cloudprovider.ErrNotImplemented && errors.Cause(err) != cloudprovider.ErrNotSupported {
 					logmsg := fmt.Sprintf("CollectBucketMetrics for %s(%s) error: %v", manager.Name, manager.Provider, err)
-					log.Errorln(logmsg)
+					log.Errorf("%s", logmsg)
 					msgs = append(msgs, logmsg)
 					succ = false
 				}
@@ -961,7 +987,7 @@ func (res *SResources) CollectMetrics(ctx context.Context, userCred mcclient.Tok
 		log.Errorf("Get influxdb %s service url: %v", options.Options.SessionEndpointType, err)
 		return
 	}
-	if err := influxdb.SendMetrics(urls, "meter_db", metrics, true); err != nil {
+	if err := influxdb.SendMetrics(urls, "meter_db", metrics, false); err != nil {
 		log.Errorf("SendMetrics to meter_db: %v", err)
 		return
 	}

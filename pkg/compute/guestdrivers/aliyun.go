@@ -103,8 +103,8 @@ func (self *SAliyunGuestDriver) IsAllowSaveImageOnRunning() bool {
 	return true
 }
 
-func (self *SAliyunGuestDriver) GetChangeConfigStatus(guest *models.SGuest) ([]string, error) {
-	return []string{api.VM_READY, api.VM_RUNNING}, nil
+func (self *SAliyunGuestDriver) GetChangeInstanceTypeStatus() ([]string, error) {
+	return []string{api.VM_READY}, nil
 }
 
 func (self *SAliyunGuestDriver) GetDeployStatus() ([]string, error) {
@@ -114,12 +114,6 @@ func (self *SAliyunGuestDriver) GetDeployStatus() ([]string, error) {
 func (self *SAliyunGuestDriver) ValidateResizeDisk(guest *models.SGuest, disk *models.SDisk, storage *models.SStorage) error {
 	if !utils.IsInStringArray(guest.Status, []string{api.VM_READY, api.VM_RUNNING}) {
 		return fmt.Errorf("Cannot resize disk when guest in status %s", guest.Status)
-	}
-	if disk.DiskType == api.DISK_TYPE_SYS {
-		return fmt.Errorf("Cannot resize system disk")
-	}
-	if !utils.IsInStringArray(storage.StorageType, []string{api.STORAGE_PUBLIC_CLOUD, api.STORAGE_CLOUD_SSD, api.STORAGE_CLOUD_EFFICIENCY}) {
-		return fmt.Errorf("Cannot resize %s disk", storage.StorageType)
 	}
 	return nil
 }

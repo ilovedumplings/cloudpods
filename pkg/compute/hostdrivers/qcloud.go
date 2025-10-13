@@ -44,6 +44,10 @@ func (self *SQcloudHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_QCLOUD
 }
 
+func (self *SQcloudHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_QCLOUD
+}
+
 func (self *SQcloudHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	if sizeGb%10 != 0 {
 		return fmt.Errorf("The disk size must be a multiple of 10Gb")
@@ -56,7 +60,7 @@ func (self *SQcloudHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb
 		min, max = 50, 16000
 	case api.STORAGE_CLOUD_SSD:
 		min, max = 100, 16000
-	case api.STORAGE_CLOUD_HSSD:
+	case api.STORAGE_CLOUD_HSSD, api.STORAGE_CLOUD_BSSD, api.STORAGE_CLOUD_TSSD:
 		min, max = 20, 320000
 	default:
 		return fmt.Errorf("Not support create or resize %s disk", storage.StorageType)
@@ -70,7 +74,7 @@ func (self *SQcloudHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb
 func (self *SQcloudHostDriver) ValidateResetDisk(ctx context.Context, userCred mcclient.TokenCredential, disk *models.SDisk, snapshot *models.SSnapshot, guests []models.SGuest, input *api.DiskResetInput) (*api.DiskResetInput, error) {
 	for _, guest := range guests {
 		if !utils.IsInStringArray(guest.Status, []string{api.VM_RUNNING, api.VM_READY}) {
-			return nil, httperrors.NewBadGatewayError("Qcloud reset disk required guest status is running or read")
+			return nil, httperrors.NewBadGatewayError("Qcloud reset disk required guest status is running or ready")
 		}
 	}
 	return input, nil
@@ -81,5 +85,5 @@ func (self *SQcloudHostDriver) RequestDeleteSnapshotWithStorage(ctx context.Cont
 }
 
 func (driver *SQcloudHostDriver) GetStoragecacheQuota(host *models.SHost) int {
-	return 10
+	return 500
 }

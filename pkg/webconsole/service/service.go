@@ -15,10 +15,8 @@
 package service
 
 import (
-	"context"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"strconv"
@@ -100,9 +98,9 @@ func start() {
 	root.Handle(WebsocketProxyPathPrefix, srv)
 
 	// misc handler
-	addMiscHandlers(app, root)
+	appsrv.AddMiscHandlersToMuxRouter(app, root, o.Options.EnableAppProfiling)
 
-	cron := cronman.InitCronJobManager(true, o.Options.CronJobWorkerCount)
+	cron := cronman.InitCronJobManager(true, o.Options.CronJobWorkerCount, o.Options.TimeZone)
 
 	cron.AddJobEveryFewHour("AutoPurgeSplitable", 4, 30, 0, db.AutoPurgeSplitable, false)
 
@@ -112,10 +110,9 @@ func start() {
 	addr := net.JoinHostPort(o.Options.Address, strconv.Itoa(o.Options.Port))
 	log.Infof("Start listen on %s", addr)
 	if o.Options.EnableSsl {
-		err := http.ListenAndServeTLS(addr,
-			o.Options.SslCertfile,
-			o.Options.SslKeyfile,
-			root)
+		srv := appsrv.InitHTTPServer(app, addr)
+		srv.Handler = root
+		err := srv.ListenAndServeTLS(o.Options.SslCertfile, o.Options.SslKeyfile)
 		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("%v", err)
 		}
@@ -125,21 +122,4 @@ func start() {
 			log.Fatalf("%v", err)
 		}
 	}
-}
-
-func addMiscHandlers(app *appsrv.Application, root *mux.Router) {
-	adapterF := func(appHandleFunc func(ctx context.Context, w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			appHandleFunc(app.GetContext(), w, r)
-		}
-	}
-
-	// ref: pkg/appsrv/appsrv:addDefaultHandlers
-	root.HandleFunc("/version", adapterF(appsrv.VersionHandler))
-	root.HandleFunc("/stats", adapterF(appsrv.StatisticHandler))
-	root.HandleFunc("/ping", adapterF(appsrv.PingHandler))
-	root.HandleFunc("/worker_stats", adapterF(appsrv.WorkerStatsHandler))
-
-	// pprof handler
-	root.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
 }

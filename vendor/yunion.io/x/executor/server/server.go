@@ -144,14 +144,6 @@ func (e *Executor) Wait(ctx context.Context, in *apis.Sn) (*apis.WaitResponse, e
 		err error
 	)
 
-	if m.stdout != nil {
-		<-m.stdoutCh
-	}
-	if m.stderr != nil {
-		<-m.stderrCh
-	}
-
-	m.wg.Wait()
 	err = m.c.Wait()
 	var (
 		exitStatus uint32
@@ -172,6 +164,14 @@ func (e *Executor) Wait(ctx context.Context, in *apis.Sn) (*apis.WaitResponse, e
 	} else {
 		exitStatus = 0
 	}
+	if m.stdout != nil {
+		<-m.stdoutCh
+	}
+	if m.stderr != nil {
+		<-m.stderrCh
+	}
+
+	m.wg.Wait()
 	cmds.Delete(in.Sn)
 	return &apis.WaitResponse{
 		ExitStatus: exitStatus,
@@ -198,6 +198,21 @@ func (e *Executor) SendInput(s apis.Executor_SendInputServer) error {
 	for {
 		input, err := s.Recv()
 		if err == io.EOF {
+			if input != nil && m == nil {
+				icm, ok := cmds.Load(input.Sn)
+				if !ok {
+					return errors.Errorf("unknown sn %d", input.Sn)
+				}
+				m = icm.(*Commander)
+				if m.stdin == nil {
+					return errors.New("Process stdin not init")
+				}
+			}
+			if m != nil {
+				if e := m.stdin.Close(); e != nil {
+					return errors.Wrap(e, "close stdin")
+				}
+			}
 			return s.SendAndClose(&apis.Error{})
 		} else if err != nil {
 			return s.SendAndClose(&apis.Error{

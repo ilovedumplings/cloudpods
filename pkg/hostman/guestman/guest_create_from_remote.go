@@ -93,10 +93,10 @@ func (m *SGuestManager) GuestCreateFromEsxi(
 			var diskInfo jsonutils.JSONObject
 			diskId := disksDesc[i].DiskId
 			iDisk := storage.CreateDisk(diskId)
-			diskInfo, err = iDisk.CreateRaw(ctx, 0, "qcow2", "", nil, "", connections.Disks[i].DiskPath)
+			diskInfo, err = iDisk.CreateRaw(ctx, 0, "qcow2", "", nil, nil, "", connections.Disks[i].DiskPath)
 			if err != nil {
 				err = errors.Wrapf(err, "create disk %s failed", diskId)
-				log.Errorf(err.Error())
+				log.Errorf("%s", err.Error())
 				break
 			}
 			diskInfo.(*jsonutils.JSONDict).Set("esxi_flat_filepath",
@@ -140,7 +140,7 @@ func (m *SGuestManager) GuestCreateFromCloudpods(
 		iDisk := storage.CreateDisk(diskId)
 		diskUrl := fmt.Sprintf("http://%s:48885/disks/%s",
 			createConfig.CloudpodsAccessInfo.HostIp, createConfig.CloudpodsAccessInfo.OriginDisksId[i])
-		if err = iDisk.CreateFromImageFuse(ctx, diskUrl, 0, nil); err != nil {
+		if err = iDisk.CreateFromRemoteHostImage(ctx, diskUrl, 0, nil); err != nil {
 			log.Errorf("failed create disk %s from fuse %s", diskUrl, err)
 			break
 		}

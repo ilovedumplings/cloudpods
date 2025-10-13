@@ -15,6 +15,8 @@
 package aliyun
 
 import (
+	"encoding/json"
+
 	"yunion.io/x/pkg/errors"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
@@ -22,12 +24,12 @@ import (
 )
 
 type AliyunTags struct {
-	Tags struct {
-		Tag []multicloud.STag
+	// 使用RawMessage来延迟解析，兼容两种格式
+	TagsRaw json.RawMessage `json:"Tags"`
 
-		// Kafka
-		TagVO []multicloud.STag `json:"TagVO" yunion-deprecated-by:"Tag"`
-	}
+	// 缓存解析后的标签
+	parsedTags []multicloud.STag
+	parsed     bool
 }
 
 var sysTags = []string{
@@ -35,15 +37,58 @@ var sysTags = []string{
 	"acs:", "serverless/", "alloc_id", "virtual-kubelet",
 	"diskId", "diskNum", "serverId", "restoreId", "cnfs-id", "from", "shadowId",
 	"ack.aliyun.com", "cluster-id.ack.aliyun.com", "ack.alibabacloud.com",
-	"k8s.io", "kubernetes.do.not.delete", "kubernetes.reused.by.user",
+	"k8s.io", "k8s.aliyun.com", "kubernetes.do.not.delete", "kubernetes.reused.by.user",
 	"HBR InstanceId", "HBR Retention Days", "HBR Retention Type", "HBR JobId",
 	"createdBy", "recoveryPointTime", "recoveryPointId",
 	"eas_resource_group_name", "eas_tenant_name", "managedby",
 }
 
+// 解析标签数据，兼容两种格式
+func (self *AliyunTags) parseTags() error {
+	if self.parsed || len(self.TagsRaw) == 0 {
+		return nil
+	}
+
+	// 先尝试解析为直接数组格式（ALB格式）
+	var directTags []multicloud.STag
+	if err := json.Unmarshal(self.TagsRaw, &directTags); err == nil {
+		self.parsedTags = directTags
+		self.parsed = true
+		return nil
+	}
+
+	// 如果失败，尝试解析为嵌套格式（传统格式）
+	var nested struct {
+		Tag   []multicloud.STag
+		TagVO []multicloud.STag `json:"TagVO"`
+	}
+
+	if err := json.Unmarshal(self.TagsRaw, &nested); err == nil {
+		// 合并Tag和TagVO
+		var allTags []multicloud.STag
+		allTags = append(allTags, nested.Tag...)
+		allTags = append(allTags, nested.TagVO...)
+		self.parsedTags = allTags
+		self.parsed = true
+		return nil
+	}
+
+	return errors.Errorf("failed to parse tags")
+}
+
+// 获取所有标签
+func (self *AliyunTags) getAllTags() []multicloud.STag {
+	self.parseTags()
+	return self.parsedTags
+}
+
 func (self *AliyunTags) GetTags() (map[string]string, error) {
 	ret := map[string]string{}
-	for _, tag := range self.Tags.Tag {
+
+	// 获取所有标签（兼容两种格式）
+	allTags := self.getAllTags()
+
+	for _, tag := range allTags {
 		if tag.IsSysTagPrefix(sysTags) {
 			continue
 		}
@@ -59,7 +104,11 @@ func (self *AliyunTags) GetTags() (map[string]string, error) {
 
 func (self *AliyunTags) GetSysTags() map[string]string {
 	ret := map[string]string{}
-	for _, tag := range self.Tags.Tag {
+
+	// 获取所有标签（兼容两种格式）
+	allTags := self.getAllTags()
+
+	for _, tag := range allTags {
 		if tag.IsSysTagPrefix(sysTags) {
 			if len(tag.TagKey) > 0 {
 				ret[tag.TagKey] = tag.TagValue

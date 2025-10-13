@@ -32,12 +32,12 @@ type SWafDomain struct {
 
 	insId           string
 	name            string
-	Httptouserip    int           `json:"HttpToUserIp"`
-	Httpport        []int         `json:"HttpPort"`
-	Isaccessproduct int           `json:"IsAccessProduct"`
+	HttpToUserIp    int           `json:"HttpToUserIp"`
+	HttpPort        []int         `json:"HttpPort"`
+	IsAccessProduct int           `json:"IsAccessProduct"`
 	Resourcegroupid string        `json:"ResourceGroupId"`
 	Readtime        int           `json:"ReadTime"`
-	Sourceips       []string      `json:"SourceIps"`
+	SourceIps       []string      `json:"SourceIps"`
 	Ipfollowstatus  int           `json:"IpFollowStatus"`
 	Clustertype     int           `json:"ClusterType"`
 	Loadbalancing   int           `json:"LoadBalancing"`
@@ -48,7 +48,8 @@ type SWafDomain struct {
 	Httpsredirect   int           `json:"HttpsRedirect"`
 	Connectiontime  int           `json:"ConnectionTime"`
 	Accesstype      string        `json:"AccessType"`
-	Httpsport       []interface{} `json:"HttpsPort"`
+	HttpsPort       []int         `json:"HttpsPort"`
+	AccessHeaders   []string
 }
 
 func (self *SRegion) DescribeDomain(id, domain string) (*SWafDomain, error) {
@@ -118,35 +119,25 @@ func (self *SRegion) DescribeDomainRuleGroup(insId, domain string) (string, erro
 }
 
 func (self *SRegion) GetICloudWafInstances() ([]cloudprovider.ICloudWafInstance, error) {
-	ins, err := self.DescribeInstanceSpecInfo()
+	wafs, err := self.GetICloudWafInstancesV1()
 	if err != nil {
-		if errors.Cause(err) == cloudprovider.ErrNotFound {
-			return []cloudprovider.ICloudWafInstance{}, nil
-		}
-		return nil, errors.Wrapf(err, "DescribeInstanceSpecInfo")
+		return nil, err
 	}
-	domains, err := self.DescribeDomainNames(ins.InstanceId)
+	wafv2, err := self.GetICloudWafInstancesV2()
 	if err != nil {
-		return nil, errors.Wrapf(err, "DescribeDomainNames")
+		return nil, err
 	}
-	ret := []cloudprovider.ICloudWafInstance{}
-	for i := range domains {
-		domain, err := self.DescribeDomain(ins.InstanceId, domains[i])
-		if err != nil {
-			return nil, errors.Wrapf(err, "DescribeDomain %s", domains[i])
-		}
-		domain.region = self
-		domain.insId = ins.InstanceId
-		domain.name = domains[i]
-		ret = append(ret, domain)
-	}
-	return ret, nil
+	return append(wafs, wafv2...), nil
 }
 
 func (self *SRegion) GetICloudWafInstanceById(id string) (cloudprovider.ICloudWafInstance, error) {
 	ins, err := self.DescribeInstanceSpecInfo()
 	if err != nil {
-		return nil, errors.Wrapf(err, "DescribeInstanceSpecInfo")
+		ins, err = self.DescribeWafInstance()
+		if err != nil {
+			return nil, err
+		}
+		return self.DescribeDomainV2(ins.InstanceId, id)
 	}
 	return self.DescribeDomain(ins.InstanceId, id)
 }
@@ -157,6 +148,14 @@ func (self *SWafDomain) GetId() string {
 
 func (self *SWafDomain) GetStatus() string {
 	return api.WAF_STATUS_AVAILABLE
+}
+
+func (self *SWafDomain) GetUpstreamPort() int {
+	return 0
+}
+
+func (self *SWafDomain) GetUpstreamScheme() string {
+	return ""
 }
 
 func (self *SWafDomain) GetWafType() cloudprovider.TWafType {
@@ -173,6 +172,42 @@ func (self *SWafDomain) GetName() string {
 
 func (self *SWafDomain) GetGlobalId() string {
 	return self.name
+}
+
+func (self *SWafDomain) GetIsAccessProduct() bool {
+	return self.IsAccessProduct == 1
+}
+
+func (self *SWafDomain) GetAccessHeaders() []string {
+	return self.AccessHeaders
+}
+
+func (self *SWafDomain) GetHttpPorts() []int {
+	return self.HttpPort
+}
+
+func (self *SWafDomain) GetHttpsPorts() []int {
+	return self.HttpsPort
+}
+
+func (self *SWafDomain) GetCname() string {
+	return self.Cname
+}
+
+func (self *SWafDomain) GetCertId() string {
+	return ""
+}
+
+func (self *SWafDomain) GetCertName() string {
+	return ""
+}
+
+func (self *SWafDomain) GetSourceIps() []string {
+	return self.SourceIps
+}
+
+func (self *SWafDomain) GetCcList() []string {
+	return []string{}
 }
 
 func (self *SWafDomain) Delete() error {
@@ -195,6 +230,10 @@ type ManagedRuleGroup struct {
 }
 
 func (self *ManagedRuleGroup) GetName() string {
+	return "RuleGroup"
+}
+
+func (self *ManagedRuleGroup) GetType() string {
 	return "RuleGroup"
 }
 
@@ -240,6 +279,26 @@ func (self *ManagedRuleGroup) GetStatementCondition() cloudprovider.TWafStatemen
 	return cloudprovider.WafStatementConditionNone
 }
 
+func (self *ManagedRuleGroup) GetExpression() string {
+	return ""
+}
+
+func (self *ManagedRuleGroup) Enable() error {
+	return cloudprovider.ErrNotImplemented
+}
+
+func (self *ManagedRuleGroup) Disable() error {
+	return cloudprovider.ErrNotImplemented
+}
+
+func (self *ManagedRuleGroup) GetEnabled() bool {
+	return true
+}
+
+func (self *ManagedRuleGroup) GetConfig() (jsonutils.JSONObject, error) {
+	return jsonutils.NewDict(), nil
+}
+
 func (self *ManagedRuleGroup) GetStatements() ([]cloudprovider.SWafStatement, error) {
 	groupName := self.ruleGroupId
 	switch self.ruleGroupId {
@@ -281,6 +340,10 @@ func (self *SDefenseTypeRule) GetName() string {
 	return self.defenseType
 }
 
+func (self *SDefenseTypeRule) GetType() string {
+	return self.defenseType
+}
+
 func (self *SDefenseTypeRule) GetDesc() string {
 	return ""
 }
@@ -301,6 +364,26 @@ func (self *SDefenseTypeRule) GetAction() *cloudprovider.DefaultAction {
 
 func (self *SDefenseTypeRule) GetStatementCondition() cloudprovider.TWafStatementCondition {
 	return cloudprovider.WafStatementConditionNone
+}
+
+func (self *SDefenseTypeRule) GetExpression() string {
+	return ""
+}
+
+func (self *SDefenseTypeRule) GetEnabled() bool {
+	return true
+}
+
+func (self *SDefenseTypeRule) Enable() error {
+	return cloudprovider.ErrNotImplemented
+}
+
+func (self *SDefenseTypeRule) Disable() error {
+	return cloudprovider.ErrNotImplemented
+}
+
+func (self *SDefenseTypeRule) GetConfig() (jsonutils.JSONObject, error) {
+	return jsonutils.NewDict(), nil
 }
 
 func (self *SDefenseTypeRule) GetStatements() ([]cloudprovider.SWafStatement, error) {

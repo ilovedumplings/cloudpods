@@ -28,8 +28,8 @@ import (
 
 	"yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/appsrv"
-	"yunion.io/x/onecloud/pkg/cloudcommon/workmanager"
 	"yunion.io/x/onecloud/pkg/hostman/guestman"
+	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
 	"yunion.io/x/onecloud/pkg/hostman/hostutils"
 	"yunion.io/x/onecloud/pkg/hostman/storageman"
 	"yunion.io/x/onecloud/pkg/httperrors"
@@ -98,30 +98,53 @@ func performImageCache(
 ) {
 	_, _, body := appsrv.FetchEnv(ctx, w, r)
 
-	disk, err := body.Get("disk")
-	if err != nil {
-		httperrors.MissingParameterError(ctx, w, "disk")
+	input := compute.CacheImageInput{}
+	{
+		err := body.Unmarshal(&input, "disk")
+		if err != nil {
+			httperrors.BadRequestError(ctx, w, "unmarshal disk %s", err)
+			return
+		}
+	}
+
+	if len(input.ImageId) == 0 {
+		httperrors.MissingParameterError(ctx, w, "image_id")
 		return
 	}
-	scId, err := disk.GetString("storagecache_id")
-	if err != nil {
-		httperrors.MissingParameterError(ctx, w, "disk")
+	if len(input.StoragecacheId) == 0 {
+		httperrors.MissingParameterError(ctx, w, "storagecache_id")
 		return
 	}
-	storagecache := storageman.GetManager().GetStoragecacheById(scId)
+
+	storagecache := storageman.GetManager().GetStoragecacheById(input.StoragecacheId)
 	if storagecache == nil {
-		httperrors.NotFoundError(ctx, w, "Storagecache %s not found", scId)
+		httperrors.NotFoundError(ctx, w, "Storagecache %s not found", input.StoragecacheId)
 		return
 	}
 
-	var performTask workmanager.DelayTaskFunc
 	if performAction == "perfetch" {
-		performTask = storagecache.PrefetchImageCache
+		if input.PreCache {
+			hostutils.DelayImagePreCacheTask(ctx, storagecache.PrefetchImageCache, input)
+		} else {
+			hostutils.DelayImageCacheTask(ctx, storagecache.PrefetchImageCache, input)
+		}
 	} else {
-		performTask = storagecache.DeleteImageCache
+		uncacheInput := compute.UncacheImageInput{}
+		body.Unmarshal(&uncacheInput, "disk")
+		// for LVM, deactivate_image is a sync call
+		if uncacheInput.DeactivateImage != nil && *uncacheInput.DeactivateImage {
+			_, err := storagecache.DeleteImageCache(ctx, uncacheInput)
+			if err != nil {
+				hostutils.Response(ctx, w, err)
+			} else {
+				hostutils.ResponseOk(ctx, w)
+			}
+			return
+		} else {
+			hostutils.DelayImageCacheTask(ctx, storagecache.DeleteImageCache, uncacheInput)
+		}
 	}
 
-	hostutils.DelayTask(ctx, performTask, disk)
 	hostutils.ResponseOk(ctx, w)
 }
 
@@ -131,7 +154,6 @@ func perfetchImageCache(ctx context.Context, w http.ResponseWriter, r *http.Requ
 
 func deleteImageCache(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	performImageCache(ctx, w, r, "delete")
-
 }
 
 func getDiskStatus(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -245,8 +267,10 @@ func performDiskActions(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	if !utils.IsInStringArray(action, []string{"create", "migrate"}) || rebuild {
 		disk, err = storage.GetDiskById(diskId)
 		if err != nil {
-			hostutils.Response(ctx, w, httperrors.NewGeneralError(errors.Wrapf(err, "GetDiskById(%s)", diskId)))
-			return
+			if errors.Cause(err) != cloudprovider.ErrNotFound || action != "delete" {
+				hostutils.Response(ctx, w, httperrors.NewGeneralError(errors.Wrapf(err, "GetDiskById(%s)", diskId)))
+				return
+			}
 		}
 	}
 
@@ -303,12 +327,31 @@ func diskResize(ctx context.Context, userCred mcclient.TokenCredential, storage 
 	if err != nil {
 		return nil, httperrors.NewMissingParameterError("disk")
 	}
+	resizeDiskInfo := &storageman.SDiskResizeInput{
+		DiskInfo: diskInfo,
+	}
 	serverId, _ := diskInfo.GetString("server_id")
+	if len(serverId) > 0 {
+		guest, ok := guestman.GetGuestManager().GetServer(serverId)
+		if !ok {
+			return nil, httperrors.NewBadRequestError("server %s not found", serverId)
+		}
+		deployDesc := deployapi.GuestStructDescToDeployDesc(guest.GetDesc())
+		resizeDiskInfo.GuestDesc = deployDesc
+	}
+
 	if len(serverId) > 0 && guestman.GetGuestManager().Status(serverId) == "running" {
 		sizeMb, _ := diskInfo.Int("size")
-		return guestman.GetGuestManager().OnlineResizeDisk(ctx, serverId, diskId, sizeMb)
+		return guestman.GetGuestManager().OnlineResizeDisk(ctx, serverId, disk, sizeMb)
 	} else {
-		hostutils.DelayTask(ctx, disk.Resize, diskInfo)
+		resizeFunc := func(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
+			input, ok := params.(*storageman.SDiskResizeInput)
+			if !ok {
+				return nil, hostutils.ParamsError
+			}
+			return disk.Resize(ctx, input)
+		}
+		hostutils.DelayTask(ctx, resizeFunc, resizeDiskInfo)
 		return nil, nil
 	}
 }
@@ -399,28 +442,7 @@ func diskSnapshot(ctx context.Context, userCred mcclient.TokenCredential, storag
 	if err != nil {
 		return nil, httperrors.NewMissingParameterError("snapshot_id")
 	}
-	hostutils.DelayTask(ctx, disk.DiskSnapshot, snapshotId)
-	return nil, nil
-}
-
-func diskStorageBackup(ctx context.Context, storage storageman.IStorage, diskId string, disk storageman.IDisk, body jsonutils.JSONObject) (interface{}, error) {
-	backupId, err := body.GetString("backup_id")
-	if err != nil {
-		return nil, httperrors.NewMissingParameterError("backup_id")
-	}
-	backupStorageId, err := body.GetString("backup_storage_id")
-	if err != nil {
-		return nil, httperrors.NewMissingParameterError("backup_storage_id")
-	}
-	backupStorageAccessInfo, err := body.Get("backup_storage_access_info")
-	if err != nil {
-		return nil, httperrors.NewMissingParameterError("backup_storage_access_info")
-	}
-	hostutils.DelayTask(ctx, storage.StorageBackup, &storageman.SStorageBackup{
-		BackupId:                backupId,
-		BackupStorageId:         backupStorageId,
-		BackupStorageAccessInfo: backupStorageAccessInfo.(*jsonutils.JSONDict),
-	})
+	hostutils.DelayBackupTask(ctx, disk.DiskSnapshot, snapshotId)
 	return nil, nil
 }
 
@@ -437,7 +459,7 @@ func diskStorageBackupRecovery(ctx context.Context, storage storageman.IStorage,
 	if err != nil {
 		return nil, httperrors.NewMissingParameterError("backup_storage_access_info")
 	}
-	hostutils.DelayTask(ctx, storage.StorageBackupRecovery, storageman.SStorageBackup{
+	hostutils.DelayBackupTask(ctx, storage.StorageBackupRecovery, storageman.SStorageBackup{
 		BackupId:                backupId,
 		BackupStorageId:         backupStorageId,
 		BackupStorageAccessInfo: backupStorageAccessInfo.(*jsonutils.JSONDict),
@@ -461,7 +483,7 @@ func diskBackup(ctx context.Context, userCred mcclient.TokenCredential, storage 
 		return nil, httperrors.NewMissingParameterError("backup_storage_id")
 	}
 	backupInfo.UserCred = userCred
-	hostutils.DelayTask(ctx, disk.DiskBackup, backupInfo)
+	hostutils.DelayBackupTask(ctx, disk.DiskBackup, backupInfo)
 	return nil, nil
 }
 

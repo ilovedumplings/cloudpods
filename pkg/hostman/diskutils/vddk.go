@@ -165,6 +165,10 @@ func (vd *VDDKDisk) Connect(*apis.GuestDesc) error {
 	return nil
 }
 
+func (vd *VDDKDisk) ConnectWithDiskId(desc *apis.GuestDesc, diskId string) error {
+	return vd.Connect(desc)
+}
+
 func (vd *VDDKDisk) Disconnect() error {
 	if vd.kvmDisk != nil {
 		if err := vd.kvmDisk.Disconnect(); err != nil {
@@ -362,7 +366,7 @@ Loop:
 	}
 
 	backup := vd.Proc.stdouterr.String()
-	log.Debugf(backup)
+	log.Debugf("%s", backup)
 	err := vd.ParsePartitions(backup)
 	if err != nil {
 		return errors.Wrap(err, "VDDKDisk.ParsePartitions")
@@ -451,8 +455,8 @@ func (vd *VDDKDisk) DeployGuestfs(req *apis.DeployParams) (res *apis.DeployGuest
 	return vd.kvmDisk.DeployGuestfs(req)
 }
 
-func (d *VDDKDisk) ResizeFs() (*apis.Empty, error) {
-	return d.kvmDisk.ResizeFs()
+func (d *VDDKDisk) ResizeFs(req *apis.ResizeFsParams) (*apis.Empty, error) {
+	return d.kvmDisk.ResizeFs(req)
 }
 
 func (d *VDDKDisk) FormatFs(req *apis.FormatFsParams) (*apis.Empty, error) {

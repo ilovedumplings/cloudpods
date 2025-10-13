@@ -40,7 +40,7 @@ type SKeystoneOptions struct {
 
 	PasswordExpirationSeconds  int `help:"password expires after the duration in seconds"`
 	PasswordMinimalLength      int `help:"password minimal length" default:"6"`
-	PasswordUniqueHistoryCheck int `help:"password must be unique in last N passwords"`
+	PasswordUniqueHistoryCheck int `help:"password must be unique in last N passwords, default is 0 means no check" default:"0"`
 	PasswordCharComplexity     int `help:"password complexity policy" default:"0"`
 
 	PasswordErrorLockCount int `help:"lock user account if given number of failed auth"`
@@ -71,18 +71,28 @@ type SKeystoneOptions struct {
 	SystemThreeAdminRoleNames []string `help:"Name of system three-admin roles" default:"sys_secadmin,sys_opsadmin,sys_adtadmin"`
 	DomainThreeAdminRoleNames []string `help:"Name of system three-admin roles" default:"domain_secadmin,domain_opsadmin,domain_adtadmin"`
 
-	LdapSearchPageSize uint32 `help:"pagination size for LDAP search" default:"100"`
+	LdapSearchPageSize    uint32 `help:"pagination size for LDAP search" default:"100"`
+	LdapSyncDisabledUsers bool   `help:"auto sync ldap disabled users"`
 
 	ProjectAdminRole     string `help:"name of role to be saved as admin user of project" default:"project_owner"`
 	PwdExpiredNotifyDays []int  `help:"The notify for password will expire " default:"1,7"`
 
-	MaxUserRolesInProject  int `help:"maximal allowed roles of a user in a project" default:"20"`
-	MaxGroupRolesInProject int `help:"maximal allowed roles of a group in a project" default:"20"`
+	MaxUserRolesInProject  int `help:"maximal allowed roles of a user in a project" default:"5"`
+	MaxGroupRolesInProject int `help:"maximal allowed roles of a group in a project" default:"3"`
+
+	ForceEnableMfa string `help:"force enable mfa" default:"disable" choices:"all|after|disable"`
 }
 
 var (
 	Options SKeystoneOptions
 )
+
+func (o SKeystoneOptions) PasswordHistoryCount() int {
+	if o.PasswordUniqueHistoryCheck > 0 {
+		return o.PasswordUniqueHistoryCheck
+	}
+	return 10
+}
 
 func OnOptionsChange(oldOptions, newOptions interface{}) bool {
 	oldOpts := oldOptions.(*SKeystoneOptions)
@@ -98,6 +108,10 @@ func OnOptionsChange(oldOptions, newOptions interface{}) bool {
 	}
 
 	if oldOpts.DefaultUserLanguage != newOpts.DefaultUserLanguage {
+		changed = true
+	}
+
+	if oldOpts.ForceEnableMfa != newOpts.ForceEnableMfa {
 		changed = true
 	}
 

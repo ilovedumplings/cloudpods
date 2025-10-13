@@ -1,8 +1,23 @@
+// Copyright 2019 Yunion
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package volume_mount
 
 import (
 	"fmt"
 
+	pdisk "github.com/shirou/gopsutil/v3/disk"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 
 	"yunion.io/x/onecloud/pkg/apis"
@@ -28,10 +43,12 @@ func GetDriver(typ apis.ContainerVolumeMountType) IVolumeMount {
 }
 
 type IPodInfo interface {
+	GetName() string
 	GetVolumesDir() string
 	GetVolumesOverlayDir() string
 	GetDisks() []*desc.SGuestDisk
 	GetDiskMountPoint(disk storageman.IDisk) string
+	GetRootFsMountPath(ctrId string) (string, error)
 }
 
 type IVolumeMount interface {
@@ -39,6 +56,21 @@ type IVolumeMount interface {
 	GetRuntimeMountHostPath(pod IPodInfo, ctrId string, vm *hostapi.ContainerVolumeMount) (string, error)
 	Mount(pod IPodInfo, ctrId string, vm *hostapi.ContainerVolumeMount) error
 	Unmount(pod IPodInfo, ctrId string, vm *hostapi.ContainerVolumeMount) error
+}
+
+type ContainerVolumeMountUsage struct {
+	Id         string
+	HostPath   string
+	MountPath  string
+	VolumeType string
+	Usage      *pdisk.UsageStat
+	Tags       map[string]string
+}
+
+type IUsageVolumeMount interface {
+	IVolumeMount
+
+	InjectUsageTags(usage *ContainerVolumeMountUsage, vol *hostapi.ContainerVolumeMount)
 }
 
 func GetRuntimeVolumeMountPropagation(input apis.ContainerMountPropagation) runtimeapi.MountPropagation {

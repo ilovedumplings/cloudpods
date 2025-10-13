@@ -58,6 +58,7 @@ func init() {
 	ImageSubformatManager.TableSpec().AddIndex(true, "image_id", "format")
 }
 
+// +onecloud:swagger-gen-ignore
 type SImageSubformat struct {
 	SImagePeripheral
 
@@ -151,7 +152,7 @@ func (self *SImageSubformat) Save(image *SImage) error {
 		log.Errorf("updateStatus fail %s", err)
 		return err
 	}
-	info, err := storage.ConvertImage(context.Background(), image, self.Format)
+	info, err := storage.ConvertImage(context.Background(), image, self.Format, nil)
 	if err != nil {
 		return errors.Wrap(err, "unable to ConvertImage")
 	}
@@ -388,4 +389,19 @@ func (self *SImageSubformat) SetStatusSeeding(seeding bool) {
 	if len(filePath) > 0 {
 		torrent.SetTorrentSeeding(filePath, seeding)
 	}
+}
+
+func (subimg *SImageSubformat) verifyStatusSelf(ctx context.Context) error {
+	if len(subimg.Location) == 0 {
+		return nil
+	}
+	filePath := subimg.Location
+	_, rc, err := GetImage(ctx, filePath)
+	if err != nil {
+		subimg.SetStatus(api.IMAGE_STATUS_UNKNOWN)
+		return errors.Wrap(err, "GetImage")
+	}
+	defer rc.Close()
+	subimg.SetStatus(api.IMAGE_STATUS_ACTIVE)
+	return nil
 }

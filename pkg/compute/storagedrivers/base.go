@@ -96,12 +96,78 @@ func (self *SBaseStorageDriver) RequestDeleteSnapshot(ctx context.Context, snaps
 			return err
 		}
 	}
+	if guest == nil {
+		var host *models.SHost
+		disk, err := models.DiskManager.FetchById(snapshot.DiskId)
+		if err != nil && err != sql.ErrNoRows {
+			return errors.Wrap(err, "get disk by snapshot")
+		}
+		if disk != nil {
+			sDisk := disk.(*models.SDisk)
+			if hostId := sDisk.GetLastAttachedHost(ctx, task.GetUserCred()); hostId != "" {
+				host = models.HostManager.FetchHostById(hostId)
+			}
+		} else {
+			if hostId := snapshot.GetMetadata(ctx, api.DISK_META_LAST_ATTACHED_HOST, task.GetUserCred()); hostId != "" {
+				host = models.HostManager.FetchHostById(hostId)
+			}
+		}
+		if host == nil {
+			storage := snapshot.GetStorage()
+			host, err = storage.GetMasterHost()
+			if err != nil {
+				return err
+			}
+		}
+
+		convertSnapshot, err := models.SnapshotManager.GetConvertSnapshot(snapshot)
+		if err != nil && err != sql.ErrNoRows {
+			return errors.Wrap(err, "get convert snapshot")
+		}
+		params := jsonutils.NewDict()
+		params.Set("delete_snapshot", jsonutils.NewString(snapshot.Id))
+		params.Set("disk_id", jsonutils.NewString(snapshot.DiskId))
+
+		if disk != nil {
+			sDisk, _ := disk.(*models.SDisk)
+			if sDisk.IsEncrypted() {
+				if encryptInfo, err := sDisk.GetEncryptInfo(ctx, task.GetUserCred()); err != nil {
+					return errors.Wrap(err, "faild get encryptInfo")
+				} else {
+					params.Set("encrypt_info", jsonutils.Marshal(encryptInfo))
+				}
+			}
+		}
+		if !snapshot.OutOfChain {
+			if convertSnapshot != nil {
+				params.Set("convert_snapshot", jsonutils.NewString(convertSnapshot.Id))
+			} else if disk != nil {
+				params.Set("block_stream", jsonutils.JSONTrue)
+			} else {
+				params.Set("auto_deleted", jsonutils.JSONTrue)
+			}
+		} else {
+			params.Set("auto_deleted", jsonutils.JSONTrue)
+		}
+
+		drv, err := host.GetHostDriver()
+		if err != nil {
+			return err
+		}
+
+		return drv.RequestDeleteSnapshotWithoutGuest(ctx, host, snapshot, params, task)
+	}
+
+	drv, err := guest.GetDriver()
+	if err != nil {
+		return err
+	}
 
 	if jsonutils.QueryBoolean(task.GetParams(), "reload_disk", false) && snapshot.OutOfChain {
 		guest.SetStatus(ctx, task.GetUserCred(), api.VM_SNAPSHOT, "Start Reload Snapshot")
 		params := jsonutils.NewDict()
 		params.Set("disk_id", jsonutils.NewString(snapshot.DiskId))
-		return guest.GetDriver().RequestReloadDiskSnapshot(ctx, guest, task, params)
+		return drv.RequestReloadDiskSnapshot(ctx, guest, task, params)
 	} else {
 		convertSnapshot, err := models.SnapshotManager.GetConvertSnapshot(snapshot)
 		if err != nil && err != sql.ErrNoRows {
@@ -111,6 +177,20 @@ func (self *SBaseStorageDriver) RequestDeleteSnapshot(ctx context.Context, snaps
 		params := jsonutils.NewDict()
 		params.Set("delete_snapshot", jsonutils.NewString(snapshot.Id))
 		params.Set("disk_id", jsonutils.NewString(snapshot.DiskId))
+
+		disk, err := models.DiskManager.FetchById(snapshot.DiskId)
+		if err != nil && err != sql.ErrNoRows {
+			return errors.Wrap(err, "get disk by snapshot")
+		}
+		sDisk, _ := disk.(*models.SDisk)
+		if sDisk.IsEncrypted() {
+			if encryptInfo, err := sDisk.GetEncryptInfo(ctx, task.GetUserCred()); err != nil {
+				return errors.Wrap(err, "faild get encryptInfo")
+			} else {
+				params.Set("encrypt_info", jsonutils.Marshal(encryptInfo))
+			}
+		}
+
 		if !snapshot.OutOfChain {
 			if convertSnapshot != nil {
 				params.Set("convert_snapshot", jsonutils.NewString(convertSnapshot.Id))
@@ -120,8 +200,16 @@ func (self *SBaseStorageDriver) RequestDeleteSnapshot(ctx context.Context, snaps
 		} else {
 			params.Set("auto_deleted", jsonutils.JSONTrue)
 		}
+		taskParams := task.GetParams()
+		if taskParams.Contains("snapshot_total_count") {
+			totalCnt, _ := taskParams.Get("snapshot_total_count")
+			params.Set("snapshot_total_count", totalCnt)
+			deletedCnt, _ := taskParams.Get("deleted_snapshot_count")
+			params.Set("deleted_snapshot_count", deletedCnt)
+		}
+
 		guest.SetStatus(ctx, task.GetUserCred(), api.VM_SNAPSHOT_DELETE, "Start Delete Snapshot")
-		return guest.GetDriver().RequestDeleteSnapshot(ctx, guest, task, params)
+		return drv.RequestDeleteSnapshot(ctx, guest, task, params)
 	}
 }
 

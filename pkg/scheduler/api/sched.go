@@ -156,6 +156,17 @@ func NewSchedInfo(input *api.ScheduleInput) *SchedInfo {
 		preferCandidates = append(preferCandidates, data.PreferHost)
 	}
 
+	if len(data.PreferRegion) > 0 && len(data.Provider) == 0 {
+		regionObj, _ := models.CloudregionManager.FetchById(data.PreferRegion)
+		if regionObj != nil {
+			region := regionObj.(*models.SCloudregion)
+			data.Provider = region.Provider
+		}
+	}
+	if len(data.Provider) == 0 {
+		data.Provider = computeapi.CLOUD_PROVIDER_ONECLOUD
+	}
+
 	if data.Backup {
 		if data.PreferBackupHost != "" {
 			preferCandidates = append(preferCandidates, data.PreferBackupHost)
@@ -207,10 +218,6 @@ func (data *SchedInfo) reviseData() {
 	}
 
 	data.Raw = input.JSON(input).String()
-}
-
-func (d *SchedInfo) SkipDirtyMarkHost() bool {
-	return d.IsContainer || d.Hypervisor == computeapi.HYPERVISOR_POD
 }
 
 func (d *SchedInfo) GetCandidateHostTypes() []string {

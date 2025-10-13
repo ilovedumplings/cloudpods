@@ -390,20 +390,24 @@ func mask2len(mask string) int8 {
 }
 
 func (host *SHost) isVnicAdmin(nic types.HostVirtualNic) bool {
+	return host.isIpAdmin(nic.Spec.Ip.IpAddress)
+}
+
+func (host *SHost) isIpAdmin(ip string) bool {
 	if len(host.masterIp) > 0 {
-		if host.masterIp == nic.Spec.Ip.IpAddress {
+		if host.masterIp == ip {
 			return true
 		} else {
 			return false
 		}
 	}
-	exist, err := host.manager.IsHostIpExists(nic.Spec.Ip.IpAddress)
+	exist, err := host.manager.IsHostIpExists(ip)
 	if err != nil {
-		log.Errorf("IsHostIpExists %s fail %s", nic.Spec.Ip.IpAddress, err)
+		log.Errorf("IsHostIpExists %s fail %s", ip, err)
 		return false
 	}
 	if exist {
-		host.masterIp = nic.Spec.Ip.IpAddress
+		host.masterIp = ip
 		return true
 	}
 	return false
@@ -448,6 +452,9 @@ func (host *SHost) fetchNicInfo(debug bool) []sHostNicInfo {
 		mac := netutils.FormatMacAddr(nic.Spec.Mac)
 		pnic := findHostNicByMac(nicInfoList, mac)
 		if pnic != nil {
+			if len(pnic.IpAddr) > 0 && host.isIpAdmin(pnic.IpAddr) {
+				continue
+			}
 			// findMaster = true
 			pnic.IpAddr = nic.Spec.Ip.IpAddress
 			pnic.IpAddrPrefixLen = mask2len(nic.Spec.Ip.SubnetMask)
@@ -598,14 +605,10 @@ func (host *SHost) GetMemSizeMB() int {
 	return int(host.getHostSystem().Summary.Hardware.MemorySize / 1024 / 1024)
 }
 
-func (host *SHost) GetStorageInfo() []SHostStorageInfo {
-	if host.storageInfo == nil {
-		host.storageInfo = host.getStorageInfo()
-	}
-	return host.storageInfo
-}
-
 func (host *SHost) getStorageInfo() []SHostStorageInfo {
+	if host.storageInfo != nil {
+		return host.storageInfo
+	}
 	diskSlots := make(map[int]SHostStorageInfo)
 	list := host.getStorages()
 	for i := 0; i < len(list); i += 1 {
@@ -633,7 +636,8 @@ func (host *SHost) getStorageInfo() []SHostStorageInfo {
 			break
 		}
 	}
-	return disks
+	host.storageInfo = disks
+	return host.storageInfo
 }
 
 func (host *SHost) getStorages() []*SHostStorageAdapterInfo {
@@ -731,7 +735,7 @@ func (host *SHost) GetStorageSizeMB() int64 {
 func (host *SHost) GetStorageType() string {
 	ssd := 0
 	rotate := 0
-	storages := host.GetStorageInfo()
+	storages := host.getStorageInfo()
 	for i := 0; i < len(storages); i += 1 {
 		if storages[i].Rotate {
 			rotate += 1
@@ -781,6 +785,7 @@ type SCreateVMParam struct {
 	Nics                 []jsonutils.JSONObject
 	ResourcePool         string
 	InstanceSnapshotInfo SEsxiInstanceSnapshotInfo
+	EnableEsxiSwap       bool
 }
 
 type SEsxiInstanceSnapshotInfo struct {
@@ -949,8 +954,12 @@ func (host *SHost) addDisks(ctx context.Context, dc *SDatacenter, ds *SDatastore
 		} else {
 			tds = ds
 		}
-		log.Debugf("ds: %s, size: %d, image path: %s, uuid: %s, index: %d, ctrlKey: %d, driver: %s, key: %d.", tds.getDatastoreObj().String(), size, imagePath, uuid, unitNumber, ctrlKey, disk.Driver, 2000+i)
-		spec := addDevSpec(NewDiskDev(size, SDiskConfig{
+		vds, err := tds.getDatastoreObj(ctx)
+		if err != nil {
+			return nil, errors.Wrapf(err, "getDatastoreObj")
+		}
+		log.Debugf("ds: %s, size: %d, image path: %s, uuid: %s, index: %d, ctrlKey: %d, driver: %s, key: %d.", vds.String(), size, imagePath, uuid, unitNumber, ctrlKey, disk.Driver, 2000+i)
+		diskDev, err := NewDiskDev(ctx, size, SDiskConfig{
 			SizeMb:        size,
 			Uuid:          uuid,
 			ControllerKey: int32(ctrlKey),
@@ -960,7 +969,11 @@ func (host *SHost) addDisks(ctx context.Context, dc *SDatacenter, ds *SDatastore
 			IsRoot:        i == 0,
 			Datastore:     tds,
 			Preallocation: disk.Preallocation,
-		}))
+		})
+		if err != nil {
+			return nil, errors.Wrapf(err, "NewDiskDev")
+		}
+		spec := addDevSpec(diskDev)
 		if len(imagePath) == 0 {
 			spec.FileOperation = "create"
 		}
@@ -1075,7 +1088,17 @@ func (host *SHost) DoCreateVM(ctx context.Context, ds *SDatastore, params SCreat
 		CpuHotAddEnabled:    &True,
 		CpuHotRemoveEnabled: &True,
 		MemoryHotAddEnabled: &True,
+
+		ExtraConfig: []types.BaseOptionValue{},
 	}
+
+	if !params.EnableEsxiSwap {
+		spec.ExtraConfig = append(spec.ExtraConfig, &types.OptionValue{
+			Key:   "sched.swap.vmxSwapEnabled",
+			Value: "FALSE",
+		})
+	}
+
 	spec.Files = &types.VirtualMachineFileInfo{
 		VmPathName: datastorePath,
 	}
@@ -1273,7 +1296,11 @@ func (host *SHost) CloneVM(ctx context.Context, from *SVirtualMachine, snapshot 
 	folderref := folders.VmFolder.Reference()
 	poolref := resourcePool.Reference()
 	hostref := host.GetHostSystem().Reference()
-	dsref := ds.getDatastoreObj().Reference()
+	tds, err := ds.getDatastoreObj(ctx)
+	if err != nil {
+		return nil, errors.Wrapf(err, "getDatastoreObj")
+	}
+	dsref := tds.Reference()
 	relocateSpec := types.VirtualMachineRelocateSpec{
 		Folder:    &folderref,
 		Pool:      &poolref,
@@ -1310,6 +1337,19 @@ func (host *SHost) CloneVM(ctx context.Context, from *SVirtualMachine, snapshot 
 		CpuHotAddEnabled:    &True,
 		CpuHotRemoveEnabled: &True,
 		MemoryHotAddEnabled: &True,
+
+		ExtraConfig: []types.BaseOptionValue{},
+
+		Firmware: "bios",
+	}
+	if from.GetBios() == cloudprovider.UEFI {
+		spec.Firmware = "efi"
+	}
+	if !params.EnableEsxiSwap {
+		spec.ExtraConfig = append(spec.ExtraConfig, &types.OptionValue{
+			Key:   "sched.swap.vmxSwapEnabled",
+			Value: "FALSE",
+		})
 	}
 	cloneSpec.Config = &spec
 	task, err := ovm.Clone(ctx, folders.VmFolder, name, *cloneSpec)
@@ -1560,7 +1600,7 @@ func (host *SHost) newLocalStorageCache() (*SDatastoreImageCache, error) {
 	}
 
 	if cacheDs == nil {
-		return nil, fmt.Errorf(errmsg)
+		return nil, fmt.Errorf("%s", errmsg)
 	}
 
 	return &SDatastoreImageCache{

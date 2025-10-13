@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"reflect"
+	"strings"
 	"time"
 
 	"yunion.io/x/jsonutils"
@@ -35,6 +36,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=diskbackup
+// +onecloud:swagger-gen-model-plural=diskbackups
 type SDiskBackupManager struct {
 	db.SVirtualResourceBaseManager
 	SDiskResourceBaseManager
@@ -85,7 +88,8 @@ func init() {
 
 type SBackupDiskConfig struct {
 	api.DiskConfig
-	Name string
+	Name        string
+	BackupAsTar *api.DiskBackupAsTarInput
 }
 
 func (dc *SBackupDiskConfig) String() string {
@@ -268,6 +272,7 @@ func (dm *SDiskBackupManager) ValidateCreateData(
 	if bs.Status != api.BACKUPSTORAGE_STATUS_ONLINE {
 		return input, httperrors.NewForbiddenError("can't backup guest to backup storage with status %s", bs.Status)
 	}
+	input.BackupStorageId = bs.GetId()
 	storage, err := disk.GetStorage()
 	if err != nil {
 		return input, errors.Wrapf(err, "unable to get storage of disk %s", disk.GetId())
@@ -279,10 +284,40 @@ func (dm *SDiskBackupManager) ValidateCreateData(
 	}
 	input.CloudregionId = region.Id
 
+	if input.BackupAsTar != nil {
+		if input.BackupAsTar.ContainerId == "" {
+			return input, httperrors.NewMissingParameterError("container_id")
+		}
+		ctr, err := GetContainerManager().FetchByIdOrName(ctx, userCred, input.BackupAsTar.ContainerId)
+		if err != nil {
+			return input, httperrors.NewNotFoundError("fetch container by %s", input.BackupAsTar.ContainerId)
+		}
+		input.BackupAsTar.ContainerId = ctr.GetId()
+		if err := dm.validateBackupAsTarFiles(input.BackupAsTar.IncludeFiles); err != nil {
+			return input, httperrors.NewInputParameterError("validate include_files: %s", err)
+		}
+		if err := dm.validateBackupAsTarFiles(input.BackupAsTar.ExcludeFiles); err != nil {
+			return input, httperrors.NewInputParameterError("validate exclude_files: %s", err)
+		}
+	}
+
 	return input, nil
 }
 
+func (dm *SDiskBackupManager) validateBackupAsTarFiles(paths []string) error {
+	for _, p := range paths {
+		if strings.HasPrefix(p, "/") {
+			return httperrors.NewInputParameterError("%s can't start with /", p)
+		}
+	}
+	return nil
+}
+
 func (db *SDiskBackup) CustomizeCreate(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, query jsonutils.JSONObject, data jsonutils.JSONObject) error {
+	input := new(api.DiskBackupCreateInput)
+	if err := data.Unmarshal(input); err != nil {
+		return err
+	}
 	err := db.SVirtualResourceBase.CustomizeCreate(ctx, userCred, ownerId, query, data)
 	if err != nil {
 		return err
@@ -293,8 +328,9 @@ func (db *SDiskBackup) CustomizeCreate(ctx context.Context, userCred mcclient.To
 	}
 	disk := diskObj.(*SDisk)
 	db.DiskConfig = &SBackupDiskConfig{
-		DiskConfig: *disk.ToDiskConfig(),
-		Name:       disk.GetName(),
+		DiskConfig:  *disk.ToDiskConfig(),
+		Name:        disk.GetName(),
+		BackupAsTar: input.BackupAsTar,
 	}
 	db.DiskType = disk.DiskType
 	db.DiskSizeMb = disk.DiskSize
@@ -371,6 +407,15 @@ func (manager *SDiskBackupManager) QueryDistinctExtraField(q *sqlchemy.SQuery, f
 		return q, nil
 	}
 
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SDiskBackupManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
+	}
 	return q, httperrors.ErrNotFound
 }
 

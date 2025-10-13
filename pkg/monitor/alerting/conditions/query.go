@@ -23,6 +23,7 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/sets"
 
 	"yunion.io/x/onecloud/pkg/apis/monitor"
 	"yunion.io/x/onecloud/pkg/hostman/hostinfo/hostconsts"
@@ -51,6 +52,7 @@ type QueryCondition struct {
 	Index         int
 	Query         AlertQuery
 	Reducer       Reducer
+	ReducerOrder  monitor.ResultReducerOrder
 	Evaluator     AlertEvaluator
 	Operator      string
 	HandleRequest tsdb.HandleRequestFunc
@@ -97,10 +99,18 @@ func (c *QueryCondition) GenerateFormatCond(meta *monitor.QueryResultMeta, metri
 	return &FormatCond{
 		QueryMeta:    meta,
 		QueryKeyInfo: metric,
-		Reducer:      c.Reducer.GetType(),
+		Reducer:      string(c.Reducer.GetType()),
 		Evaluator:    c.Evaluator,
 	}
 }
+
+func (c *QueryCondition) IsCloudResource() bool {
+	if c.ResType == "" {
+		return false
+	}
+	return monitor.MetricCloudResTypes.Has(c.ResType)
+}
+
 func (c FormatCond) String() string {
 	if c.QueryMeta != nil {
 		return fmt.Sprintf("%s(%q) %s", c.Reducer, c.QueryMeta.RawQuery, c.Evaluator.String())
@@ -108,9 +118,15 @@ func (c FormatCond) String() string {
 	return "no_data"
 }
 
-func (c *QueryCondition) filterTags(tags map[string]string, details monitor.CommonAlertMetricDetails) map[string]string {
+func (c *QueryCondition) filterTags(tags map[string]string, cloudTags map[string]string, details monitor.CommonAlertMetricDetails) map[string]string {
 	ret := make(map[string]string)
-	for key, val := range tags {
+	allTags := make(map[string]string)
+	for _, ts := range []map[string]string{tags, cloudTags} {
+		for k, v := range ts {
+			allTags[k] = v
+		}
+	}
+	for key, val := range allTags {
 		//if strings.HasSuffix(key, "_id") {
 		//	continue
 		//}
@@ -158,12 +174,13 @@ func (c *QueryCondition) Eval(context *alerting.EvalContext) (*alerting.Conditio
 	var matches []*monitor.EvalMatch
 	var alertOkmatches []*monitor.EvalMatch
 
-	//allResources, err := c.GetQueryResources()
-	//if err != nil {
-	//	return nil, errors.Wrap(err, "GetQueryResources err")
-	//}
+	alert, err := models.CommonAlertManager.GetAlert(context.Rule.Id)
+	if err != nil {
+		return nil, errors.Wrap(err, "GetAlert to NewEvalMatch error")
+	}
+
 	for _, series := range seriesList {
-		if len(c.ResType) != 0 {
+		if c.IsCloudResource() {
 			isLatestOfSerie, resource := c.serieIsLatestResource(nil, series)
 			if !isLatestOfSerie {
 				continue
@@ -192,16 +209,20 @@ func (c *QueryCondition) Eval(context *alerting.EvalContext) (*alerting.Conditio
 			meta = &metas[0]
 		}
 		if evalMatch {
-			match, err := c.NewEvalMatch(context, *series, meta, reducedValue, valStrArr)
+			match, err := c.NewEvalMatch(alert, context, *series, meta, reducedValue, valStrArr, evalMatch)
 			if err != nil {
 				return nil, errors.Wrap(err, "NewEvalMatch error")
 			}
 			matches = append(matches, match)
 		}
 		if reducedValue != nil && !evalMatch {
-			match, err := c.NewEvalMatch(context, *series, meta, reducedValue, valStrArr)
+			match, err := c.NewEvalMatch(alert, context, *series, meta, reducedValue, valStrArr, evalMatch)
 			if err != nil {
 				return nil, errors.Wrap(err, "NewEvalMatch error")
+			}
+			resId := monitor.GetResourceIdFromTagWithDefault(match.Tags, c.ResType)
+			if err := OkEvalMatchSetIsRecovery(alert, resId, match); err != nil {
+				log.Warningf("[Query] set eval match %s to recovered: %v", jsonutils.Marshal(match), err)
 			}
 			alertOkmatches = append(alertOkmatches, match)
 		}
@@ -240,12 +261,7 @@ func (c *QueryCondition) Eval(context *alerting.EvalContext) (*alerting.Conditio
 }
 
 func (c *QueryCondition) serieIsLatestResource(resources map[string]jsonutils.JSONObject, series *monitor.TimeSeries) (bool, jsonutils.JSONObject) {
-	tagId := monitor.MEASUREMENT_TAG_ID[c.ResType]
-	if len(tagId) == 0 {
-		tagId = "host_id"
-	}
-	resId := series.Tags[tagId]
-	log.Debugf("serieIsLatestResource use tagId %q, found resId %q", tagId, resId)
+	resId := monitor.GetResourceIdFromTagWithDefault(series.Tags, c.ResType)
 	if len(resources) != 0 {
 		resource, ok := resources[resId]
 		if !ok {
@@ -274,14 +290,21 @@ func (c *QueryCondition) FillSerieByResourceField(resource jsonutils.JSONObject,
 		if err != nil {
 			continue
 		}
-		series.Tags[tagKey], _ = val.GetString()
+		if series.CloudTags == nil {
+			series.CloudTags = map[string]string{}
+		}
+		series.CloudTags[tagKey], _ = val.GetString()
 	}
 }
 
-func (c *QueryCondition) NewEvalMatch(context *alerting.EvalContext, series monitor.TimeSeries,
-	meta *monitor.QueryResultMeta, value *float64, valStrArr []string) (*monitor.EvalMatch, error) {
+func (c *QueryCondition) NewEvalMatch(
+	alert *models.SCommonAlert,
+	context *alerting.EvalContext,
+	series monitor.TimeSeries,
+	meta *monitor.QueryResultMeta,
+	value *float64, valStrArr []string, isMatch bool) (*monitor.EvalMatch, error) {
 	evalMatch := new(monitor.EvalMatch)
-	alertDetails, err := c.GetCommonAlertDetails(context)
+	alertDetails, err := c.GetCommonAlertDetails(alert)
 	if err != nil {
 		return nil, errors.Wrap(err, "GetAlert to NewEvalMatch error")
 	}
@@ -294,9 +317,9 @@ func (c *QueryCondition) NewEvalMatch(context *alerting.EvalContext, series moni
 		queryKeyInfo = evalMatch.Metric
 	}
 	evalMatch.Unit = alertDetails.FieldDescription.Unit
-	evalMatch.Tags = c.filterTags(series.Tags, *alertDetails)
+	evalMatch.Tags = c.filterTags(series.Tags, series.CloudTags, *alertDetails)
 	evalMatch.Value = value
-	evalMatch.ValueStr = alerting.RationalizeValueFromUnit(*value, alertDetails.FieldDescription.Unit,
+	evalMatch.ValueStr = models.RationalizeValueFromUnit(*value, alertDetails.FieldDescription.Unit,
 		alertDetails.FieldOpt)
 	if alertDetails.GetPointStr {
 		evalMatch.ValueStr = c.jointPointStr(series, evalMatch.ValueStr, valStrArr)
@@ -305,10 +328,22 @@ func (c *QueryCondition) NewEvalMatch(context *alerting.EvalContext, series moni
 	//c.newRuleDescription(context, alertDetails)
 	//evalMatch.Condition = c.GenerateFormatCond(meta, queryKeyInfo).String()
 	msg := fmt.Sprintf("%s.%s %s %s", alertDetails.Measurement, alertDetails.Field,
-		alertDetails.Comparator, alerting.RationalizeValueFromUnit(alertDetails.Threshold, evalMatch.Unit, ""))
+		alertDetails.Comparator, models.RationalizeValueFromUnit(alertDetails.Threshold, evalMatch.Unit, ""))
 	if len(context.Rule.Message) == 0 {
 		context.Rule.Message = msg
 	}
+	// 避免重复指标
+	if isMatch {
+		op := alertDetails.Operator
+		if op != "" && c.Index > 0 {
+			msg = fmt.Sprintf("%s %s", strings.ToUpper(op), msg)
+		}
+		msgSet := sets.NewString(context.Rule.TriggeredMessages...)
+		if !msgSet.Has(msg) {
+			context.Rule.TriggeredMessages = append(context.Rule.TriggeredMessages, msg)
+		}
+	}
+	evalMatch.AlertDetails = jsonutils.Marshal(alertDetails)
 	return evalMatch, nil
 }
 
@@ -341,11 +376,7 @@ func (m *meterFetchImp) FetchCustomizeEvalMatch(context *alerting.EvalContext, e
 	return nil
 }
 
-func (c *QueryCondition) GetCommonAlertDetails(context *alerting.EvalContext) (*monitor.CommonAlertMetricDetails, error) {
-	alert, err := models.CommonAlertManager.GetAlert(context.Rule.Id)
-	if err != nil {
-		return nil, errors.Wrap(err, "GetAlert to NewEvalMatch error")
-	}
+func (c *QueryCondition) GetCommonAlertDetails(alert *models.SCommonAlert) (*monitor.CommonAlertMetricDetails, error) {
 	settings, _ := alert.GetSettings()
 	alertDetails := alert.GetCommonAlertMetricDetailsFromAlertCondition(c.Index, &settings.Conditions[c.Index])
 	return alertDetails, nil
@@ -364,8 +395,9 @@ func (c *QueryCondition) jointPointStr(series monitor.TimeSeries, value string, 
 }
 
 type queryResult struct {
-	series monitor.TimeSeriesSlice
-	metas  []monitor.QueryResultMeta
+	series        monitor.TimeSeriesSlice
+	metas         []monitor.QueryResultMeta
+	reducedResult *monitor.ReducedResult
 }
 
 func (c *QueryCondition) executeQuery(evalCtx *alerting.EvalContext, timeRange *tsdb.TimeRange) (*queryResult, error) {
@@ -493,6 +525,7 @@ func newQueryCondition(model *monitor.AlertCondition, index int) (*QueryConditio
 		return nil, fmt.Errorf("error in condition %v: %v", index, err)
 	}
 	cond.Reducer = reducer
+	cond.ReducerOrder = model.ReducerOrder
 	evaluator, err := NewAlertEvaluator(&model.Evaluator)
 	if err != nil {
 		return nil, fmt.Errorf("error in condition %v: %v", index, err)
@@ -517,20 +550,23 @@ func (c *QueryCondition) checkGroupByField() {
 	}
 	for i, group := range c.Query.Model.GroupBy {
 		if group.Params[0] == "*" {
-			c.Query.Model.GroupBy[i].Params = []string{monitor.MEASUREMENT_TAG_ID[metricMeasurement.ResType]}
+			tagId := monitor.GetMeasurementTagIdKeyByResType(metricMeasurement.ResType)
+			if tagId == "" {
+				tagId = "*"
+			}
+			c.Query.Model.GroupBy[i].Params = []string{tagId}
 		}
 	}
 }
 
 func (c *QueryCondition) setResType() {
+	metricMeasurement, _ := models.MetricMeasurementManager.GetCache().Get(c.Query.Model.Measurement)
+	if metricMeasurement != nil {
+		c.ResType = metricMeasurement.ResType
+	}
 	var resType = monitor.METRIC_RES_TYPE_HOST
 	if len(c.Query.Model.GroupBy) == 0 {
 		return
-	}
-	metricMeasurement, _ := models.MetricMeasurementManager.GetCache().Get(c.Query.Model.Measurement)
-	if metricMeasurement != nil {
-		resType = metricMeasurement.ResType
-		c.ResType = resType
 	}
 	// NOTE: shouldn't set ResType when tenant_id and domain_id within GroupBy
 	/* if len(resType) != 0 && c.Query.Model.GroupBy[0].Params[0] != monitor.
@@ -548,7 +584,9 @@ func (c *QueryCondition) setResType() {
 		}
 	} */
 	if c.Query.Model.Database == monitor.METRIC_DATABASE_TELE {
-		c.ResType = resType
+		if c.ResType == "" {
+			c.ResType = resType
+		}
 	}
 }
 
@@ -563,7 +601,7 @@ func (c *QueryCondition) GetQueryResources(s *mcclient.ClientSession, scope stri
 
 func (c *QueryCondition) getOnecloudResources(s *mcclient.ClientSession, scope string, showDetails bool) ([]jsonutils.JSONObject, error) {
 	query := jsonutils.NewDict()
-	query.Add(jsonutils.NewStringArray([]string{"running", "ready"}), "status")
+	queryStatus := []string{"running", "ready"}
 	// query.Add(jsonutils.NewString("true"), "admin")
 	//if len(c.Query.Model.Tags) != 0 {
 	//	query, err = c.convertTagsQuery(evalContext, query)
@@ -578,7 +616,8 @@ func (c *QueryCondition) getOnecloudResources(s *mcclient.ClientSession, scope s
 	)
 	switch c.ResType {
 	case monitor.METRIC_RES_TYPE_HOST:
-		query.Set("host_type", jsonutils.NewString(hostconsts.TELEGRAF_TAG_KEY_HYPERVISOR))
+		// models.SetQueryHostType(query)
+		queryStatus = append(queryStatus, "unknown")
 		query.Set("enabled", jsonutils.NewInt(1))
 		manager = &mc_mds.Hosts
 	case monitor.METRIC_RES_TYPE_GUEST:
@@ -605,10 +644,11 @@ func (c *QueryCondition) getOnecloudResources(s *mcclient.ClientSession, scope s
 	default:
 		query := jsonutils.NewDict()
 		query.Set("brand", jsonutils.NewString(hostconsts.TELEGRAF_TAG_ONECLOUD_BRAND))
-		query.Set("host-type", jsonutils.NewString(hostconsts.TELEGRAF_TAG_KEY_HYPERVISOR))
+		models.SetQueryHostType(query)
 		manager = &mc_mds.Hosts
 	}
 
+	query.Add(jsonutils.NewStringArray(queryStatus), "status")
 	allResources, err = ListAllResources(s, manager, query, scope, showDetails)
 	if err != nil {
 		return nil, errors.Wrapf(err, "ListAllResources for %s with query %s, scope: %s, showDetails: %v", manager.GetKeyword(), query, scope, showDetails)

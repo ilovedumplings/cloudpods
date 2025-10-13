@@ -17,10 +17,9 @@ package storageman
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
+	"path"
 	"path/filepath"
-	"strings"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
@@ -29,6 +28,7 @@ import (
 	"yunion.io/x/pkg/util/qemuimgfmt"
 	"yunion.io/x/pkg/utils"
 
+	apis2 "yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	hostapi "yunion.io/x/onecloud/pkg/apis/host"
 	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
@@ -48,12 +48,16 @@ const (
 )
 
 type sStorageConf struct {
-	MonHost            string
-	Key                string
-	Pool               string
-	RadosMonOpTimeout  int64
-	RadosOsdOpTimeout  int64
-	ClientMountTimeout int64
+	MonHost string
+	Key     string
+	Pool    string
+	// https://docs.ceph.com/en/latest/rados/configuration/msgr2/
+	// The messenger v2 protocol, or msgr2, is the second major
+	// revision on Ceph’s on-wire protocol.
+	EnableMessengerV2  bool
+	RadosMonOpTimeout  int
+	RadosOsdOpTimeout  int
+	ClientMountTimeout int
 }
 
 type SRbdStorage struct {
@@ -99,7 +103,7 @@ func (s *SRbdStorage) getCephClient(pool string) (*cephutils.CephClient, error) 
 	if pool == "" {
 		pool = s.Pool
 	}
-	return cephutils.NewClient(s.MonHost, s.Key, pool)
+	return cephutils.NewClient(s.MonHost, s.Key, pool, s.EnableMessengerV2, s.RadosMonOpTimeout, s.RadosOsdOpTimeout, s.ClientMountTimeout)
 }
 
 func (s *SRbdStorage) getClient() (*cephutils.CephClient, error) {
@@ -136,25 +140,17 @@ func (s *SRbdStorage) GetImgsaveBackupPath() string {
 	return ""
 }
 
+func (s *SRbdStorage) getStorageConfDir() string {
+	workspacePath := filepath.Dir(options.HostOptions.ServersPath)
+	cephConfDir := path.Join(workspacePath, "ceph_config", s.StorageId)
+	return cephConfDir
+}
+
 // Tip Configuration values containing :, @, or = can be escaped with a leading \ character.
 func (s *SRbdStorage) getStorageConfString() string {
-	conf := []string{}
-	conf = append(conf, "mon_host="+strings.ReplaceAll(s.MonHost, ",", `\;`))
-	key := s.Key
-	if len(key) > 0 {
-		for _, k := range []string{":", "@", "="} {
-			key = strings.ReplaceAll(key, k, fmt.Sprintf(`\%s`, k))
-		}
-		conf = append(conf, "key="+key)
-	}
-	for k, timeout := range map[string]int64{
-		"rados_mon_op_timeout": s.RadosMonOpTimeout,
-		"rados_osd_op_timeout": s.RadosOsdOpTimeout,
-		"client_mount_timeout": s.ClientMountTimeout,
-	} {
-		conf = append(conf, fmt.Sprintf("%s=%d", k, timeout))
-	}
-	return ":" + strings.Join(conf, ":")
+	cephConfDir := s.getStorageConfDir()
+	cephConfPath := path.Join(cephConfDir, "ceph.conf")
+	return ":" + fmt.Sprintf("conf=%s", cephConfPath)
 }
 
 func (s *SRbdStorage) listImages() ([]string, error) {
@@ -403,16 +399,31 @@ func (s *SRbdStorage) SyncStorageSize() (api.SHostStorageStat, error) {
 	return stat, nil
 }
 
+func (s *SRbdStorage) GetCapacityMb() int {
+	capa, err := s.getRbdCapacity()
+	if err != nil {
+		return -1
+	}
+	return int(capa.CapacitySizeKb) / 1024
+}
+
+func (s *SRbdStorage) getRbdCapacity() (*cephutils.SCapacity, error) {
+	client, err := s.getClient()
+	if err != nil {
+		return nil, errors.Wrap(err, "getClient")
+	}
+	defer client.Close()
+	capacity, err := client.GetCapacity()
+	if err != nil {
+		return nil, errors.Wrap(err, "GetCapacity")
+	}
+	return capacity, nil
+}
+
 func (s *SRbdStorage) SyncStorageInfo() (jsonutils.JSONObject, error) {
 	content := map[string]interface{}{}
 	if len(s.StorageId) > 0 {
-		client, err := s.getClient()
-		if err != nil {
-			reason := jsonutils.Marshal(map[string]string{"reason": errors.Wrapf(err, "GetClient").Error()})
-			return modules.Storages.PerformAction(hostutils.GetComputeSession(context.Background()), s.StorageId, api.STORAGE_OFFLINE, reason)
-		}
-		defer client.Close()
-		capacity, err := client.GetCapacity()
+		capacity, err := s.getRbdCapacity()
 		if err != nil {
 			reason := jsonutils.Marshal(map[string]string{"reason": errors.Wrapf(err, "GetCapacity").Error()})
 			return modules.Storages.PerformAction(hostutils.GetComputeSession(context.Background()), s.StorageId, api.STORAGE_OFFLINE, reason)
@@ -518,10 +529,17 @@ func (s *SRbdStorage) saveToGlance(ctx context.Context, imageId, imagePath strin
 		return err
 	}
 
-	tmpFileDir, err := ioutil.TempDir(options.HostOptions.TempPath, "ceph_save_images")
+	tmpPath := "/opt/cloud/tmp"
+	err = os.MkdirAll(tmpPath, 0755)
+	if err != nil {
+		log.Errorf("failed mkdir %s", tmpPath)
+		return errors.Wrap(err, "os.MkdirAll")
+	}
+
+	tmpFileDir, err := os.MkdirTemp(tmpPath, "ceph_save_images")
 	if err != nil {
 		log.Errorf("fail to obtain tempFile for ceph save glance image: %s", err)
-		return errors.Wrap(err, "ioutil.TempDir")
+		return errors.Wrap(err, "os.MkdirTemp")
 	}
 	defer func() {
 		log.Debugf("clean up temp dir for glance image save %s", tmpFileDir)
@@ -590,9 +608,17 @@ func (s *SRbdStorage) DeleteSnapshots(ctx context.Context, params interface{}) (
 	return nil, fmt.Errorf("Not support delete snapshots")
 }
 
-func (s *SRbdStorage) CreateDiskFromSnapshot(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) error {
+func (s *SRbdStorage) DeleteSnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
+	return nil, fmt.Errorf("Not support delete snapshot")
+}
+
+func (s *SRbdStorage) CreateDiskFromSnapshot(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) (jsonutils.JSONObject, error) {
 	info := input.DiskInfo
-	return disk.CreateFromRbdSnapshot(ctx, info.SnapshotUrl, info.SrcDiskId, info.SrcPool)
+	err := disk.CreateFromRbdSnapshot(ctx, info.SnapshotUrl, info.SrcDiskId, info.SrcPool)
+	if err != nil {
+		return nil, err
+	}
+	return disk.GetDiskDesc(), nil
 }
 
 func (s *SRbdStorage) GetBackupDir() string {
@@ -606,7 +632,7 @@ func (s *SRbdStorage) CreateDiskFromExistingPath(context.Context, IDisk, *SDiskC
 func (s *SRbdStorage) CreateDiskFromBackup(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) error {
 	pool, _ := s.StorageConf.GetString("pool")
 	destPath := fmt.Sprintf("rbd:%s/%s%s", pool, disk.GetId(), s.getStorageConfString())
-	err := doRestoreDisk(ctx, input.DiskInfo, destPath, input.DiskInfo.Format)
+	err := doRestoreDisk(ctx, s, input, disk, destPath)
 	if err != nil {
 		return errors.Wrap(err, "doRestore")
 	}
@@ -636,9 +662,7 @@ func (s *SRbdStorage) GetCloneTargetDiskPath(ctx context.Context, targetDiskId s
 	return s.GetDiskPath(targetDiskId)
 }
 
-func (s *SRbdStorage) CloneDiskFromStorage(
-	ctx context.Context, srcStorage IStorage, srcDisk IDisk, targetDiskId string, fullCopy bool,
-) (*hostapi.ServerCloneDiskFromStorageResponse, error) {
+func (s *SRbdStorage) CloneDiskFromStorage(ctx context.Context, srcStorage IStorage, srcDisk IDisk, targetDiskId string, fullCopy bool, encInfo apis2.SEncryptInfo) (*hostapi.ServerCloneDiskFromStorageResponse, error) {
 	srcDiskPath := srcDisk.GetPath()
 	srcImg, err := qemuimg.NewQemuImage(srcDiskPath)
 	if err != nil {
@@ -682,5 +706,28 @@ func (s *SRbdStorage) SetStorageInfo(storageId, storageName string, conf jsonuti
 	if s.ClientMountTimeout == 0 {
 		s.ClientMountTimeout = api.RBD_DEFAULT_MOUNT_TIMEOUT
 	}
+	confDir := s.getStorageConfDir()
+	if err := os.MkdirAll(confDir, os.ModePerm); err != nil {
+		return errors.Wrapf(err, "mkdir all %s", confDir)
+	}
+	confPath := path.Join(confDir, "ceph.conf")
+	keyringPath := path.Join(confDir, "ceph.keyring")
+
+	cli, err := cephutils.NewClientAndPersistentConf(
+		s.MonHost, s.Key, s.Pool,
+		s.EnableMessengerV2, s.RadosMonOpTimeout,
+		s.RadosOsdOpTimeout, s.ClientMountTimeout,
+		confPath, keyringPath,
+	)
+	if err != nil {
+		log.Errorf("failed get ceph client %s:", err)
+		return errors.Wrap(err, "getClient")
+	}
+	defer cli.Close()
+
 	return nil
+}
+
+func (s *SRbdStorage) CleanRecycleDiskfiles(ctx context.Context) {
+	log.Infof("SRbdStorage CleanRecycleDiskfiles do nothing!")
 }

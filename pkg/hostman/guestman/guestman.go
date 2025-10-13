@@ -32,6 +32,7 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/clock"
 	"yunion.io/x/pkg/util/seclib"
 	"yunion.io/x/pkg/utils"
 
@@ -39,12 +40,18 @@ import (
 	"yunion.io/x/onecloud/pkg/apis/compute"
 	hostapi "yunion.io/x/onecloud/pkg/apis/host"
 	"yunion.io/x/onecloud/pkg/appsrv"
+	"yunion.io/x/onecloud/pkg/hostman/container/prober"
+	"yunion.io/x/onecloud/pkg/hostman/container/snapshot_service"
 	"yunion.io/x/onecloud/pkg/hostman/guestman/arch"
 	"yunion.io/x/onecloud/pkg/hostman/guestman/desc"
 	fwd "yunion.io/x/onecloud/pkg/hostman/guestman/forwarder"
 	fwdpb "yunion.io/x/onecloud/pkg/hostman/guestman/forwarder/api"
+	"yunion.io/x/onecloud/pkg/hostman/guestman/pod/pleg"
+	"yunion.io/x/onecloud/pkg/hostman/guestman/pod/runtime"
+	"yunion.io/x/onecloud/pkg/hostman/guestman/pod/statusman"
 	"yunion.io/x/onecloud/pkg/hostman/guestman/types"
 	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
+	"yunion.io/x/onecloud/pkg/hostman/hostinfo"
 	"yunion.io/x/onecloud/pkg/hostman/hostinfo/hostconsts"
 	"yunion.io/x/onecloud/pkg/hostman/hostutils"
 	"yunion.io/x/onecloud/pkg/hostman/monitor"
@@ -53,9 +60,11 @@ import (
 	"yunion.io/x/onecloud/pkg/hostman/storageman/lvmutils"
 	"yunion.io/x/onecloud/pkg/hostman/storageman/remotefile"
 	"yunion.io/x/onecloud/pkg/httperrors"
+	"yunion.io/x/onecloud/pkg/image/drivers/s3"
 	"yunion.io/x/onecloud/pkg/mcclient"
 	modules "yunion.io/x/onecloud/pkg/mcclient/modules/compute"
 	"yunion.io/x/onecloud/pkg/util/cgrouputils"
+	"yunion.io/x/onecloud/pkg/util/cgrouputils/cpuset"
 	"yunion.io/x/onecloud/pkg/util/fileutils2"
 	"yunion.io/x/onecloud/pkg/util/netutils2"
 	"yunion.io/x/onecloud/pkg/util/pod"
@@ -67,7 +76,7 @@ var (
 	LAST_USED_PORT            = 0
 	LAST_USED_NBD_SERVER_PORT = 0
 	LAST_USED_MIGRATE_PORT    = 0
-	NbdWorker                 = appsrv.NewWorkerManager("nbd_worker", 1, appsrv.DEFAULT_BACKLOG, false)
+	NbdWorker                 *appsrv.SWorkerManager
 )
 
 const (
@@ -106,11 +115,23 @@ type SGuestManager struct {
 	numaAllocate bool
 	cpuSet       *CpuSetCounter
 	pythonPath   string
+
+	// container related members
+	containerProbeManager      prober.Manager
+	enableDirtyRecoveryFeature bool
+	containerRuntimeManager    runtime.Runtime
+	pleg                       pleg.PodLifecycleEventGenerator
+	podCache                   runtime.Cache
+	cpufreqSimulateManager     *SCpuFreqRealTimeSimulateManager
 }
 
-func NewGuestManager(host hostutils.IHost, serversPath string) (*SGuestManager, error) {
+func NewGuestManager(host hostutils.IHost, serversPath string, workerCnt int) (*SGuestManager, error) {
+	// init nbd worker
+	NbdWorker = appsrv.NewWorkerManager("nbd_worker", workerCnt, appsrv.DEFAULT_BACKLOG, false)
+
 	manager := &SGuestManager{}
 	manager.host = host
+	host.SetIGuestManager(manager)
 	manager.ServersPath = serversPath
 	manager.Servers = new(sync.Map)
 	manager.portsInUse = new(sync.Map)
@@ -128,7 +149,64 @@ func NewGuestManager(host hostutils.IHost, serversPath string) (*SGuestManager, 
 	if err != nil {
 		return nil, errors.Wrap(err, "mkdir qemu log dir")
 	}
+	if manager.host.IsContainerHost() {
+		statusman.GetManager().Start()
+		manager.startContainerProbeManager()
+		runtimeMan, err := runtime.NewRuntimeManager(manager.GetCRI())
+		if err != nil {
+			return nil, errors.Wrap(err, "new container runtime manager")
+		}
+		manager.podCache = runtime.NewCache()
+		manager.containerRuntimeManager = runtimeMan
+		manager.pleg = pleg.NewGenericPLEG(runtimeMan, pleg.ChannelCapacity, pleg.RelistPeriod, manager.podCache, clock.RealClock{})
+		manager.pleg.Start()
+		go func() {
+			if err := manager.startContainerdSnapshotService(); err != nil {
+				log.Fatalf("start containerd snapshot service: %s", err)
+			}
+		}()
+		if options.HostOptions.EnableRealtimeCpufreqSimulate {
+			cpufreqConfig := manager.host.GetContainerCpufreqSimulateConfig()
+			if cpufreqConfig != nil {
+				maxFreq, _ := cpufreqConfig.Int("scaling_max_freq")
+				minFreq, _ := cpufreqConfig.Int("scaling_min_freq")
+				interval := options.HostOptions.RealtimeCpufreqSimulateInterval
+				manager.cpufreqSimulateManager = newCpuFreqRealTimeSimulateManager(interval, maxFreq, minFreq)
+			}
+		}
+
+	}
 	return manager, nil
+}
+
+func (h *SGuestManager) startContainerdSnapshotService() error {
+	root := filepath.Join(options.HostOptions.ServersPath, "containerd_snapshots")
+	err := snapshot_service.StartService(h, root)
+	if err != nil {
+		return errors.Wrap(err, "new snapshot service")
+	}
+	return nil
+}
+
+func (h *SGuestManager) GetContainerManager(serverId string) (snapshot_service.ISnapshotContainerManager, error) {
+	pod, ok := h.GetServer(serverId)
+	if !ok {
+		return nil, errors.Wrapf(httperrors.ErrNotFound, "server %s not found", serverId)
+	}
+	return pod.(snapshot_service.ISnapshotContainerManager), nil
+}
+
+func (m *SGuestManager) startContainerSyncLoop() {
+	if m.host.IsContainerHost() {
+		go func() {
+			m.syncContainerLoop(m.pleg.Watch())
+		}()
+		if !options.HostOptions.DisableReconcileContainer {
+			go func() {
+				m.reconcileContainerLoop(m.podCache)
+			}()
+		}
+	}
 }
 
 func (m *SGuestManager) InitQemuMaxCpus(machineCaps []monitor.MachineInfo, kvmMaxCpus uint) {
@@ -170,8 +248,15 @@ func (m *SGuestManager) InitQemuMaxCpus(machineCaps []monitor.MachineInfo, kvmMa
 }
 
 func (m *SGuestManager) InitQemuMaxMems(maxMems uint) {
-	if maxMems > arch.X86_MAX_MEM_MB {
-		arch.X86_MAX_MEM_MB = maxMems
+	if m.host.IsX8664() {
+		if maxMems > arch.X86_MAX_MEM_MB {
+			arch.X86_MAX_MEM_MB = maxMems
+		}
+	}
+	if m.host.IsAarch64() {
+		if maxMems > arch.ARM_MAX_MEM_MB {
+			arch.ARM_MAX_MEM_MB = maxMems
+		}
 	}
 }
 
@@ -255,9 +340,25 @@ func (m *SGuestManager) CleanServer(sid string) {
 
 func (m *SGuestManager) Bootstrap() (chan struct{}, error) {
 	hostTypo := m.host.GetHostTopology()
-	m.numaAllocate = m.host.IsNumaAllocateEnabled() && m.host.IsHugepagesEnabled() && (len(hostTypo.Nodes) > 1)
+
+	if options.HostOptions.EnableHostAgentNumaAllocate {
+		enableMemAlloc := m.host.IsContainerHost() || m.host.IsHugepagesEnabled()
+		m.numaAllocate = !m.host.IsNumaAllocateEnabled() && enableMemAlloc && (len(hostTypo.Nodes) > 1)
+	}
+
+	var reserveCpus = cpuset.NewCPUSet()
+	hostReserveCpus, guestPinnedCpus := m.host.GetReservedCpusInfo()
+	if hostReserveCpus != nil {
+		reserveCpus = reserveCpus.Union(*hostReserveCpus)
+	}
+	if guestPinnedCpus != nil {
+		reserveCpus = reserveCpus.Union(*guestPinnedCpus)
+	}
+
 	cpuSet, err := NewGuestCpuSetCounter(
-		hostTypo, m.host.GetReservedCpusInfo(), m.numaAllocate, m.host.HugepageSizeKb())
+		hostTypo, reserveCpus, m.numaAllocate, m.host.IsContainerHost(),
+		m.host.HugepageSizeKb(), m.host.CpuCmtBound(), m.host.MemCmtBound(), m.host.GetReservedMemMb(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -270,12 +371,36 @@ func (m *SGuestManager) Bootstrap() (chan struct{}, error) {
 	} else {
 		m.isLoaded = true
 		log.Infof("Loading existing guests ...")
+		if m.needDirtyRecovery() {
+			if err := m.createDisableDirtyRecoveryFile(); err != nil {
+				log.Errorf("create disable dirty recovery file: %s", err)
+			} else {
+				log.Infof("[%s created] enable dirty recovery feature", m.disableDirtyRecoveryFilePath())
+				m.enableDirtyRecoveryFeature = true
+			}
+		} else {
+			log.Infof("[%s existed] disable dirty recovery feature", m.disableDirtyRecoveryFilePath())
+			m.enableDirtyRecoveryFeature = false
+		}
 		if len(m.CandidateServers) > 0 {
 			m.VerifyExistingGuests(false)
 		} else {
 			m.OnLoadExistingGuestsComplete()
 		}
 	}
+	timeutils2.AddTimeout(time.Second*time.Duration(options.HostOptions.EnableDirtyRecoverySeconds), func() {
+		if err := m.removeDisableDirtyRecoveryFile(); err != nil {
+			log.Errorf("remove disable dirty recovery file %s: %s", m.disableDirtyRecoveryFilePath(), err)
+		} else {
+			log.Infof("[%s removed] enable dirty recovery feature at next bootstrap", m.disableDirtyRecoveryFilePath())
+		}
+	})
+	if m.cpufreqSimulateManager != nil {
+		go m.cpufreqSimulateManager.StartSetCpuFreqSimulate()
+	}
+
+	m.host.OnGuestLoadingComplete()
+
 	return m.dirtyServersChan, nil
 }
 
@@ -306,6 +431,35 @@ func (m *SGuestManager) VerifyExistingGuests(pendingDelete bool) {
 func (m *SGuestManager) OnVerifyExistingGuestsFail(err error, pendingDelete bool) {
 	log.Errorf("OnVerifyExistingGuestFail: %s, try again 30 seconds later", err.Error())
 	timeutils2.AddTimeout(30*time.Second, func() { m.VerifyExistingGuests(false) })
+}
+
+func (m *SGuestManager) disableDirtyRecoveryFilePath() string {
+	return path.Join(options.HostOptions.ServersPath, "disable-guests-dirty-recovery")
+}
+
+func (m *SGuestManager) removeDisableDirtyRecoveryFile() error {
+	if !fileutils2.Exists(m.disableDirtyRecoveryFilePath()) {
+		return nil
+	}
+	return os.RemoveAll(m.disableDirtyRecoveryFilePath())
+}
+
+func (m *SGuestManager) createDisableDirtyRecoveryFile() error {
+	if fileutils2.Exists(m.disableDirtyRecoveryFilePath()) {
+		return nil
+	}
+	return fileutils2.FilePutContents(m.disableDirtyRecoveryFilePath(), "", false)
+}
+
+func (m *SGuestManager) needDirtyRecovery() bool {
+	if fileutils2.Exists(m.disableDirtyRecoveryFilePath()) {
+		return false
+	}
+	return true
+}
+
+func (m *SGuestManager) EnableDirtyRecoveryFeature() bool {
+	return m.enableDirtyRecoveryFeature
 }
 
 func (m *SGuestManager) OnVerifyExistingGuestsSucc(servers []jsonutils.JSONObject, pendingDelete bool) {
@@ -351,6 +505,7 @@ func (m *SGuestManager) OnLoadExistingGuestsComplete() {
 	if !options.HostOptions.EnableCpuBinding {
 		m.ClenaupCpuset()
 	}
+	m.startContainerSyncLoop()
 }
 
 func (m *SGuestManager) verifyDirtyServers() {
@@ -365,7 +520,11 @@ func (m *SGuestManager) verifyDirtyServers() {
 
 func (m *SGuestManager) ClenaupCpuset() {
 	m.Servers.Range(func(k, v interface{}) bool {
-		guest := v.(*SKVMGuestInstance)
+		inst := v.(GuestRuntimeInstance)
+		guest, ok := inst.(*SKVMGuestInstance)
+		if !ok {
+			return true
+		}
 		guest.CleanupCpuset()
 		return true
 	})
@@ -414,8 +573,12 @@ func (m *SGuestManager) CPUSetRemove(ctx context.Context, sid string) error {
 	return guest.CPUSetRemove(ctx)
 }
 
-func (m *SGuestManager) IsGuestDir(f os.FileInfo) bool {
-	return hostutils.IsGuestDir(f, m.ServersPath)
+func (m *SGuestManager) IsGuestDir(f os.DirEntry) bool {
+	fi, err := f.Info()
+	if err != nil {
+		return false
+	}
+	return hostutils.IsGuestDir(fi, m.ServersPath)
 }
 
 func (m *SGuestManager) IsGuestExist(sid string) bool {
@@ -427,7 +590,7 @@ func (m *SGuestManager) IsGuestExist(sid string) bool {
 }
 
 func (m *SGuestManager) LoadExistingGuests() {
-	files, err := ioutil.ReadDir(m.ServersPath)
+	files, err := os.ReadDir(m.ServersPath)
 	if err != nil {
 		log.Errorf("List servers path %s error %s", m.ServersPath, err)
 	}
@@ -445,7 +608,7 @@ func (m *SGuestManager) GetServerDescFilePath(sid string) string {
 
 func (m *SGuestManager) GetServerDesc(sid string) (*desc.SGuestDesc, error) {
 	descPath := m.GetServerDescFilePath(sid)
-	descStr, err := ioutil.ReadFile(descPath)
+	descStr, err := os.ReadFile(descPath)
 	if err != nil {
 		return nil, errors.Wrapf(err, "read file %s", descPath)
 	}
@@ -481,7 +644,11 @@ func (m *SGuestManager) LoadServer(sid string) {
 
 func (m *SGuestManager) ShutdownServers() {
 	m.Servers.Range(func(k, v interface{}) bool {
-		guest := v.(*SKVMGuestInstance)
+		inst := v.(GuestRuntimeInstance)
+		guest, ok := inst.(*SKVMGuestInstance)
+		if !ok {
+			return true
+		}
 		log.Infof("Start shutdown server %s", guest.GetName())
 
 		// scriptStop maybe stuck on guest storage offline
@@ -490,6 +657,34 @@ func (m *SGuestManager) ShutdownServers() {
 		}
 		return true
 	})
+}
+
+func (m *SGuestManager) GetQgaRunningGuests() []string {
+	qgaRunningGuestIds := []string{}
+	m.Servers.Range(func(k, v interface{}) bool {
+		guest, ok := v.(*SKVMGuestInstance)
+		if !ok {
+			return true
+		}
+		if !guest.IsRunning() {
+			return true
+		}
+
+		if guest.guestAgent == nil {
+			// in case guestAgent not init
+			return true
+		}
+
+		err := guest.guestAgent.GuestPing(1)
+		if err == nil {
+			qgaRunningGuestIds = append(qgaRunningGuestIds, guest.Id)
+		} else {
+			log.Debugf("failed exec guest-ping %s", err)
+		}
+		return true
+	})
+
+	return qgaRunningGuestIds
 }
 
 func (m *SGuestManager) GetGuestNicDesc(
@@ -512,6 +707,19 @@ func (m *SGuestManager) GetGuestNicDesc(
 		return true
 	})
 	return guestDesc, nic
+}
+
+func (m *SGuestManager) GetAllGuestIPv6Macs(bridge string) []string {
+	macs := []string{}
+	m.Servers.Range(func(k, v interface{}) bool {
+		guest := v.(GuestRuntimeInstance)
+		if guest.IsLoaded() {
+			nicMacs := guest.GetIpv6NicMacs(bridge)
+			macs = append(macs, nicMacs...)
+		}
+		return true
+	})
+	return macs
 }
 
 func (m *SGuestManager) getGuestNicDescInCandidate(
@@ -780,7 +988,7 @@ func (m *SGuestManager) startDeploy(
 	password, _ := deployParams.Body.GetString("password")
 	resetPassword := jsonutils.QueryBoolean(deployParams.Body, "reset_password", false)
 	if resetPassword && len(password) == 0 {
-		password = seclib.RandomPassword(12)
+		password = seclib.RandomPassword2(14)
 	}
 	enableCloudInit := jsonutils.QueryBoolean(deployParams.Body, "enable_cloud_init", false)
 	loginAccount, _ := deployParams.Body.GetString("login_account")
@@ -788,6 +996,11 @@ func (m *SGuestManager) startDeploy(
 	telegrafConfig, _ := deployParams.Body.GetString("telegraf_conf")
 	if deployTelegraf && telegrafConfig == "" {
 		return nil, errors.Errorf("missing telegraf_conf")
+	}
+
+	// refresh port_mappings
+	if err := NewPortMappingManager(m).AllocateGuestPortMappings(ctx, deployParams.UserCred, guest); err != nil {
+		return nil, errors.Wrap(err, "allocate port mappings")
 	}
 
 	guestInfo, err := guest.DeployFs(ctx, deployParams.UserCred,
@@ -844,14 +1057,66 @@ func (m *SGuestManager) Status(sid string) string {
 
 func (m *SGuestManager) GetGuestStatus(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
 	sid := params.(string)
-	status := m.getStatus(sid)
 	guest, _ := m.GetServer(sid)
-	body := jsonutils.NewDict()
+	resp := m.ProbeGuestInitStatus(sid)
 	if guest != nil {
-		body.Set("power_status", jsonutils.NewString(GetPowerStates(guest)))
+		// resp is nil ONLY IF the monitor not started
+		resp = guest.HandleGuestStatus(ctx, resp, false)
 	}
+	if resp != nil {
+		hostutils.TaskComplete(ctx, jsonutils.Marshal(resp))
+	}
+	return nil, nil
+}
 
-	return guest.HandleGuestStatus(ctx, status, body)
+func (m *SGuestManager) UploadGuestStatus(ctx context.Context, sid string) (jsonutils.JSONObject, error) {
+	reason := fmt.Sprintf("upload guest %s status by host", sid)
+	guest, _ := m.GetServer(sid)
+	if guest == nil {
+		return nil, httperrors.NewNotFoundError("Guest %s not found", sid)
+	}
+	status := m.ProbeGuestInitStatus(sid)
+	status = guest.HandleGuestStatus(ctx, status, true)
+	ret, err := hostutils.UploadGuestStatus(ctx, sid, status)
+	// do post action like marking container dirty after uploading guests status
+	guest.PostUploadStatus(status, reason)
+	log.Infof("upload guest %s to region response: %s, error: %v", sid, jsonutils.Marshal(ret), err)
+	return jsonutils.Marshal(ret), err
+}
+
+func (m *SGuestManager) UploadGuestsStatus(ctx context.Context, i interface{}) (jsonutils.JSONObject, error) {
+	input := i.(*compute.HostUploadGuestsStatusRequest)
+	// errs := []error{}
+	resp := &compute.HostUploadGuestsStatusInput{
+		Guests: make(map[string]*compute.HostUploadGuestStatusInput, 0),
+	}
+	reason := "upload guests status by host"
+	for _, sid := range input.GuestIds {
+		guest, _ := m.GetServer(sid)
+		status := m.ProbeGuestInitStatus(sid)
+		if guest != nil {
+			status = guest.HandleGuestStatus(ctx, status, true)
+		}
+		// if status, err := srv.GetUploadStatus(ctx, reason); err != nil {
+		//	errs = append(errs, errors.Wrapf(err, "upload guest %s status", srv.GetId()))
+		//} else {
+		resp.Guests[sid] = status
+		//}
+	}
+	// if len(errs) > 0 {
+	//	log.Errorf("Get upload guests status: %v", errors.NewAggregate(errs))
+	// }
+	ret, err := hostutils.UploadGuestsStatus(ctx, resp)
+	// do post action like marking container dirty after uploading guests status
+	for id, status := range resp.Guests {
+		srv, _ := m.GetServer(id)
+		if srv == nil {
+			continue
+		}
+		srv.PostUploadStatus(status, reason)
+	}
+	log.Infof("upload guests to region response: %s", jsonutils.Marshal(ret).String())
+	return ret, err
 }
 
 func (m *SGuestManager) getStatus(sid string) string {
@@ -935,7 +1200,8 @@ func (m *SGuestManager) GuestSync(ctx context.Context, params interface{}) (json
 		}
 
 		fwOnly := jsonutils.QueryBoolean(syncParams.Body, "fw_only", false)
-		return guest.SyncConfig(ctx, guestDesc, fwOnly)
+		setUefiBootOrder := jsonutils.QueryBoolean(syncParams.Body, "set_uefi_boot_order", false)
+		return guest.SyncConfig(ctx, guestDesc, fwOnly, setUefiBootOrder)
 	}
 	return nil, nil
 }
@@ -1202,7 +1468,11 @@ func (m *SGuestManager) GetNBDServerFreePort() int {
 func (m *SGuestManager) GetFreeVncPort() int {
 	vncPorts := make(map[int]struct{}, 0)
 	m.Servers.Range(func(k, v interface{}) bool {
-		guest := v.(*SKVMGuestInstance)
+		inst := v.(GuestRuntimeInstance)
+		guest, ok := inst.(*SKVMGuestInstance)
+		if !ok {
+			return true
+		}
 		inUsePort := guest.GetVncPort()
 		if inUsePort > 0 {
 			vncPorts[inUsePort] = struct{}{}
@@ -1246,8 +1516,8 @@ func (m *SGuestManager) DoSnapshot(ctx context.Context, params interface{}) (jso
 	if !ok {
 		return nil, hostutils.ParamsError
 	}
-	guest, _ := m.GetKVMServer(snapshotParams.Sid)
-	return guest.ExecDiskSnapshotTask(ctx, snapshotParams.UserCred, snapshotParams.Disk, snapshotParams.SnapshotId)
+	guest, _ := m.GetServer(snapshotParams.Sid)
+	return guest.DoSnapshot(ctx, snapshotParams)
 }
 
 func (m *SGuestManager) DeleteSnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
@@ -1256,15 +1526,8 @@ func (m *SGuestManager) DeleteSnapshot(ctx context.Context, params interface{}) 
 		return nil, hostutils.ParamsError
 	}
 
-	if len(delParams.ConvertSnapshot) > 0 || delParams.BlockStream {
-		guest, _ := m.GetKVMServer(delParams.Sid)
-		return guest.ExecDeleteSnapshotTask(ctx, delParams.Disk, delParams.DeleteSnapshot,
-			delParams.ConvertSnapshot, delParams.BlockStream)
-	} else {
-		res := jsonutils.NewDict()
-		res.Set("deleted", jsonutils.JSONTrue)
-		return res, delParams.Disk.DeleteSnapshot(delParams.DeleteSnapshot, "")
-	}
+	guest, _ := m.GetServer(delParams.Sid)
+	return guest.DeleteSnapshot(ctx, delParams)
 }
 
 func (m *SGuestManager) DoMemorySnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
@@ -1328,13 +1591,13 @@ func (m *SGuestManager) Resume(ctx context.Context, sid string, isLiveMigrate bo
 	return nil, nil
 }
 
-func (m *SGuestManager) OnlineResizeDisk(ctx context.Context, sid string, diskId string, sizeMb int64) (jsonutils.JSONObject, error) {
-	guest, ok := m.GetKVMServer(sid)
+func (m *SGuestManager) OnlineResizeDisk(ctx context.Context, sid string, disk storageman.IDisk, sizeMb int64) (jsonutils.JSONObject, error) {
+	guest, ok := m.GetServer(sid)
 	if !ok {
 		return nil, httperrors.NewNotFoundError("guest %s not found", sid)
 	}
 	if guest.IsRunning() {
-		guest.onlineResizeDisk(ctx, diskId, sizeMb)
+		guest.OnlineResizeDisk(ctx, disk, sizeMb)
 		return nil, nil
 	} else {
 		return nil, httperrors.NewInvalidStatusError("guest is not runnign")
@@ -1425,14 +1688,18 @@ func (m *SGuestManager) HotplugCpuMem(ctx context.Context, params interface{}) (
 	if !ok {
 		return nil, hostutils.ParamsError
 	}
+
 	guest, _ := m.GetKVMServer(hotplugParams.Sid)
-	NewGuestHotplugCpuMemTask(ctx, guest, int(hotplugParams.AddCpuCount), int(hotplugParams.AddMemSize)).Start()
+	NewGuestHotplugCpuMemTask(ctx, guest, hotplugParams).Start()
 	return nil, nil
 }
 
 func (m *SGuestManager) ExitGuestCleanup() {
+	if m.cpufreqSimulateManager != nil {
+		m.cpufreqSimulateManager.Stop()
+	}
 	m.Servers.Range(func(k, v interface{}) bool {
-		guest := v.(*SKVMGuestInstance)
+		guest := v.(GuestRuntimeInstance)
 		guest.ExitCleanup(false)
 		return true
 	})
@@ -1498,7 +1765,9 @@ func (m *SGuestManager) RequestVerifyDirtyServer(s GuestRuntimeInstance) {
 		log.Errorf("Dirty server request start error: %s", err)
 	} else if jsonutils.QueryBoolean(ret, "guest_unknown_need_clean", false) {
 		m.Delete(s.GetInitialId())
-		s.CleanGuest(context.Background(), true)
+		if err := s.CleanDirtyGuest(context.Background()); err != nil {
+			log.Errorf("failed clean dirty server %s: %s", s.GetInitialId(), err)
+		}
 	}
 }
 
@@ -1646,6 +1915,75 @@ func (m *SGuestManager) GetGuestTrafficRecord(sid string) (map[string]compute.SN
 	return record, nil
 }
 
+func (m *SGuestManager) ProbeGuestInitStatus(sid string) *compute.HostUploadGuestStatusInput {
+	guest, _ := m.GetServer(sid)
+	status := m.getStatus(sid)
+	resp := &compute.HostUploadGuestStatusInput{
+		PerformStatusInput: apis.PerformStatusInput{
+			Status:         status,
+			BlockJobsCount: -1,
+			HostId:         hostinfo.Instance().HostId,
+		},
+	}
+	if guest == nil {
+		return resp
+	}
+	resp.PowerStates = GetPowerStates(guest)
+
+	return resp
+}
+
+func (m *SGuestManager) RequestGuestScreenDump(sid string) (jsonutils.JSONObject, error) {
+	guest, _ := m.GetServer(sid)
+	if guest == nil {
+		return nil, httperrors.NewNotFoundError("guest %s not found", sid)
+	}
+	kvmGuest, ok := guest.(*SKVMGuestInstance)
+	if !ok {
+		return nil, httperrors.NewBadRequestError("guest %s not kvm instance", sid)
+	}
+
+	screenDumpPath := kvmGuest.generateScreenDumpPath()
+	screenDumpName := filepath.Base(screenDumpPath)
+	c := make(chan interface{}, 0)
+	kvmGuest.Monitor.ScreenDump(screenDumpPath, func(res string) {
+		log.Infof("qmp screendump res %s", res)
+		if len(res) > 0 {
+			c <- errors.Errorf("qmp screen dump failed: %s", res)
+			return
+		}
+
+		if fileutils2.Exists(screenDumpPath) {
+			log.Infof("screendump success at %s", screenDumpPath)
+			_, err := s3.Put(context.Background(), screenDumpPath, screenDumpName, 50, 4, nil)
+			if err != nil {
+				log.Errorf("faild put screenDumpPath %s to s3 %s", screenDumpPath, err)
+				c <- err
+			} else {
+				screenDumpInfo := compute.SGuestScreenDump{
+					S3AccessKey:  options.HostOptions.S3AccessKey,
+					S3SecretKey:  options.HostOptions.S3SecretKey,
+					S3Endpoint:   options.HostOptions.S3Endpoint,
+					S3BucketName: options.HostOptions.S3BucketName,
+					S3ObjectName: screenDumpName,
+					S3UseSSL:     options.HostOptions.S3UseSSL,
+				}
+				c <- jsonutils.Marshal(screenDumpInfo)
+				log.Infof("put screendump %s success", screenDumpName)
+				os.Remove(screenDumpPath)
+			}
+		}
+	})
+	ret := <-c
+	switch ret.(type) {
+	case jsonutils.JSONObject:
+		return ret.(jsonutils.JSONObject), nil
+	case error:
+		return nil, ret.(error)
+	}
+	return nil, errors.Errorf("unknown ret of screendump")
+}
+
 func SyncGuestNicsTraffics(guestNicsTraffics map[string]map[string]compute.SNicTrafficRecord) {
 	session := hostutils.GetComputeSession(context.Background())
 	hostId := guestManager.host.GetHostId()
@@ -1662,9 +2000,9 @@ func Stop() {
 	guestManager.ExitGuestCleanup()
 }
 
-func Init(host hostutils.IHost, serversPath string) error {
+func Init(host hostutils.IHost, serversPath string, workerCnt int) error {
 	if guestManager == nil {
-		manager, err := NewGuestManager(host, serversPath)
+		manager, err := NewGuestManager(host, serversPath, workerCnt)
 		if err != nil {
 			return err
 		}

@@ -108,6 +108,8 @@ func (h *MiscHandler) Bind(app *appsrv.Application) {
 	// syslog webservice handlers
 	app.AddHandler(POST, prefix+"syslog/token", handleSyslogWebServiceToken)
 	app.AddHandler(POST, prefix+"syslog/message", handleSyslogWebServiceMessage)
+	// service settings
+	app.AddHandler(GET, prefix+"service_settings", h.getServiceSettings)
 }
 
 func UploadHandlerInfo(method, prefix string, handler func(context.Context, http.ResponseWriter, *http.Request)) *appsrv.SHandlerInfo {
@@ -175,7 +177,7 @@ func (mh *MiscHandler) DoBatchHostRegister(ctx context.Context, w http.ResponseW
 	file, err := hostfiles[0].Open()
 	defer file.Close()
 	if err != nil {
-		log.Errorf(err.Error())
+		log.Errorf("%s", err.Error())
 		e := httperrors.NewInternalServerError("can't open file")
 		httperrors.JsonClientError(ctx, w, e)
 		return
@@ -183,7 +185,7 @@ func (mh *MiscHandler) DoBatchHostRegister(ctx context.Context, w http.ResponseW
 
 	xlsx, err := excelize.OpenReader(file)
 	if err != nil {
-		log.Errorf(err.Error())
+		log.Errorf("%s", err.Error())
 		e := httperrors.NewInternalServerError("can't parse file")
 		httperrors.JsonClientError(ctx, w, e)
 		return
@@ -243,7 +245,7 @@ func (mh *MiscHandler) DoBatchHostRegister(ctx context.Context, w http.ResponseW
 
 	// skipped header row
 	if len(rows) > BATCH_HOST_REGISTER_QUANTITY_LIMITATION {
-		e := httperrors.NewInputParameterError(fmt.Sprintf("beyond limitation. excel file rows must less than %d", BATCH_HOST_REGISTER_QUANTITY_LIMITATION))
+		e := httperrors.NewInputParameterError("beyond limitation. excel file rows must less than %d", BATCH_HOST_REGISTER_QUANTITY_LIMITATION)
 		httperrors.JsonClientError(ctx, w, e)
 		return
 	}
@@ -328,7 +330,7 @@ func (mh *MiscHandler) DoBatchUserRegister(ctx context.Context, w http.ResponseW
 	file, err := userfiles[0].Open()
 	defer file.Close()
 	if err != nil {
-		log.Errorf(err.Error())
+		log.Errorf("%s", err.Error())
 		e := httperrors.NewInternalServerError("can't open file")
 		httperrors.JsonClientError(ctx, w, e)
 		return
@@ -336,7 +338,7 @@ func (mh *MiscHandler) DoBatchUserRegister(ctx context.Context, w http.ResponseW
 
 	xlsx, err := excelize.OpenReader(file)
 	if err != nil {
-		log.Errorf(err.Error())
+		log.Errorf("%s", err.Error())
 		e := httperrors.NewInternalServerError("can't parse file")
 		httperrors.JsonClientError(ctx, w, e)
 		return
@@ -349,7 +351,7 @@ func (mh *MiscHandler) DoBatchUserRegister(ctx context.Context, w http.ResponseW
 		httperrors.JsonClientError(ctx, w, e)
 		return
 	} else if len(rows) > BATCH_USER_REGISTER_QUANTITY_LIMITATION {
-		e := httperrors.NewInputParameterError(fmt.Sprintf("beyond limitation.excel file rows must less than %d", BATCH_USER_REGISTER_QUANTITY_LIMITATION))
+		e := httperrors.NewInputParameterError("beyond limitation.excel file rows must less than %d", BATCH_USER_REGISTER_QUANTITY_LIMITATION)
 		httperrors.JsonClientError(ctx, w, e)
 		return
 	}
@@ -460,7 +462,7 @@ func (mh *MiscHandler) getDownloadsHandler(ctx context.Context, w http.ResponseW
 	params := appctx.AppContextParams(ctx)
 	template, ok := params["<template_id>"]
 	if !ok || len(template) == 0 {
-		httperrors.InvalidInputError(ctx, w, "template_id")
+		httperrors.MissingParameterError(ctx, w, "template_id")
 		return
 	}
 

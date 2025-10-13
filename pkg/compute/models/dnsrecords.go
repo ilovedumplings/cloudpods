@@ -24,6 +24,7 @@ import (
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/tristate"
 	"yunion.io/x/pkg/util/compare"
@@ -43,6 +44,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=dnsrecord
+// +onecloud:swagger-gen-model-plural=dnsrecords
 type SDnsRecordManager struct {
 	db.SEnabledStatusStandaloneResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -73,11 +76,16 @@ type SDnsRecord struct {
 	DnsValue   string `width:"256" charset:"ascii" nullable:"false" list:"user" update:"user" create:"required"`
 	TTL        int64  `nullable:"false" list:"user" update:"user" create:"required" json:"ttl"`
 	MxPriority int64  `nullable:"false" list:"user" update:"user" create:"optional"`
+	// cloudflare 特有
+	Proxied tristate.TriState `default:"false" list:"user" create:"optional"`
 
 	// 解析线路类型
 	PolicyType string `width:"36" charset:"ascii" nullable:"false" list:"user" update:"user" create:"optional"`
 	// 解析线路
 	PolicyValue string `width:"256" charset:"ascii" nullable:"false" list:"user" update:"user" create:"optional"`
+
+	// 目前存储阿里云GTM设置地址及AWS TrafficPolicy端点地址, 仅支持同步
+	ExtraAddresses []string `width:"512" charset:"utf8" nullable:"true" list:"user"`
 }
 
 func (manager *SDnsRecordManager) EnableGenerateName() bool {
@@ -237,18 +245,22 @@ func (self *SDnsRecord) RealDelete(ctx context.Context, userCred mcclient.TokenC
 }
 
 type sRecordUniqValues struct {
-	DnsZoneId string
-	DnsType   string
-	DnsName   string
-	DnsValue  string
+	DnsZoneId   string
+	DnsType     string
+	DnsName     string
+	DnsValue    string
+	PolicyType  string
+	PolicyValue string
 }
 
 func (self *SDnsRecord) GetUniqValues() jsonutils.JSONObject {
 	return jsonutils.Marshal(sRecordUniqValues{
-		DnsZoneId: self.DnsZoneId,
-		DnsName:   self.Name,
-		DnsType:   self.DnsType,
-		DnsValue:  self.DnsValue,
+		DnsZoneId:   self.DnsZoneId,
+		DnsName:     self.Name,
+		DnsType:     self.DnsType,
+		DnsValue:    self.DnsValue,
+		PolicyType:  self.PolicyType,
+		PolicyValue: self.PolicyValue,
 	})
 }
 
@@ -272,6 +284,12 @@ func (manager *SDnsRecordManager) FilterByUniqValues(q *sqlchemy.SQuery, values 
 	}
 	if len(uniq.DnsValue) > 0 {
 		q = q.Equals("dns_value", uniq.DnsValue)
+	}
+	if len(uniq.PolicyType) > 0 {
+		q = q.Equals("policy_type", uniq.PolicyType)
+	}
+	if len(uniq.PolicyValue) > 0 {
+		q = q.Equals("policy_value", uniq.PolicyValue)
 	}
 
 	return q
@@ -485,6 +503,7 @@ func (self *SDnsRecord) syncWithDnsRecord(ctx context.Context, userCred mcclient
 	diff, err := db.Update(self, func() error {
 		self.Name = ext.GetDnsName()
 		self.Enabled = tristate.NewFromBool(ext.GetEnabled())
+		self.Proxied = tristate.NewFromBool(ext.IsProxied())
 		self.Status = ext.GetStatus()
 		self.TTL = ext.GetTTL()
 		self.MxPriority = ext.GetMxPriority()
@@ -492,6 +511,12 @@ func (self *SDnsRecord) syncWithDnsRecord(ctx context.Context, userCred mcclient
 		self.DnsValue = ext.GetDnsValue()
 		self.PolicyType = string(ext.GetPolicyType())
 		self.PolicyValue = string(ext.GetPolicyValue())
+		extraAddresses, err := ext.GetExtraAddresses()
+		if err != nil {
+			log.Errorf("GetExtraAddresses for record %s error: %v", self.Name, err)
+			return nil
+		}
+		self.ExtraAddresses = extraAddresses
 		return nil
 	})
 	if err != nil {
@@ -513,6 +538,7 @@ func (self *SDnsZone) newFromCloudDnsRecord(ctx context.Context, userCred mcclie
 	record.Name = ext.GetDnsName()
 	record.Status = ext.GetStatus()
 	record.Enabled = tristate.NewFromBool(ext.GetEnabled())
+	record.Proxied = tristate.NewFromBool(ext.IsProxied())
 	record.TTL = ext.GetTTL()
 	record.MxPriority = ext.GetMxPriority()
 	record.DnsType = string(ext.GetDnsType())
@@ -520,6 +546,7 @@ func (self *SDnsZone) newFromCloudDnsRecord(ctx context.Context, userCred mcclie
 	record.ExternalId = ext.GetGlobalId()
 	record.PolicyType = string(ext.GetPolicyType())
 	record.PolicyValue = string(ext.GetPolicyValue())
+	record.ExtraAddresses, _ = ext.GetExtraAddresses()
 
 	err := DnsRecordManager.TableSpec().Insert(ctx, record)
 	if err != nil {

@@ -181,6 +181,9 @@ type SWorkerManager struct {
 	ignoreOverflow bool
 
 	cancelPrevIdent bool
+
+	queueInitHook  func() error
+	queueEmptyHook func() error
 }
 
 func NewWorkerManager(name string, workerCount int, backlog int, dbWorker bool) *SWorkerManager {
@@ -188,6 +191,12 @@ func NewWorkerManager(name string, workerCount int, backlog int, dbWorker bool) 
 }
 
 func NewWorkerManagerIgnoreOverflow(name string, workerCount int, backlog int, dbWorker bool, ignoreOverflow bool) *SWorkerManager {
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	if backlog <= 0 {
+		backlog = 128
+	}
 	manager := SWorkerManager{name: name,
 		queue:          NewRing(workerCount * backlog),
 		workerCount:    workerCount,
@@ -220,6 +229,14 @@ type sWorkerTask struct {
 	worker  chan *SWorker
 	onError func(error)
 	start   time.Time
+}
+
+func (wm *SWorkerManager) SetQueueInitHook(f func() error) {
+	wm.queueInitHook = f
+}
+
+func (wm *SWorkerManager) SetQueueEmptyHook(f func() error) {
+	wm.queueEmptyHook = f
 }
 
 func (wm *SWorkerManager) EnableCancelPreviousIdenticalTask() {
@@ -260,6 +277,12 @@ func (wm *SWorkerManager) removeWorker(worker *SWorker) {
 	} else {
 		wm.detachedWorker.removeWithLock(worker)
 	}
+	if wm.activeWorker.size()+wm.detachedWorker.size() == 0 && wm.queueEmptyHook != nil {
+		err := wm.queueEmptyHook()
+		if err != nil {
+			log.Errorf("queueEmptyHook fail %s", err)
+		}
+	}
 }
 
 func execCallback(task *sWorkerTask) {
@@ -283,6 +306,13 @@ func (wm *SWorkerManager) schedule() {
 }
 
 func (wm *SWorkerManager) scheduleWithLock() {
+	if wm.activeWorker.size()+wm.detachedWorker.size() == 0 && wm.queueInitHook != nil {
+		err := wm.queueInitHook()
+		if err != nil {
+			log.Errorf("queueInitHook fail %s", err)
+			return
+		}
+	}
 	queueSize := wm.queue.Size()
 	if wm.activeWorker.size() < wm.workerCount && queueSize > 0 {
 		wm.workerId += 1
@@ -292,15 +322,14 @@ func (wm *SWorkerManager) scheduleWithLock() {
 			log.Debugf("no enough worker, add new worker %s", worker)
 		}
 		go worker.run()
-	} else if queueSize > 10 {
-		log.Warningf("[%s] BUSY activeWork %d detachedWork %d max %d queue: %d", wm, wm.ActiveWorkerCount(), wm.DetachedWorkerCount(), wm.workerCount, wm.queue.Size())
 	} else if queueSize > 50 {
 		w := wm.activeWorker.list.Front()
-		for w != nil {
+		if w != nil {
 			worker := w.Value.(*SWorker)
 			log.Warningf("work [%s]%s stucking for a while", worker.task.start, worker.task.task.Dump())
-			w = w.Next()
 		}
+	} else if queueSize > 10 {
+		log.Warningf("[%s] BUSY activeWork %d detachedWork %d max %d queue: %d", wm, wm.ActiveWorkerCount(), wm.DetachedWorkerCount(), wm.workerCount, wm.queue.Size())
 	}
 }
 
@@ -352,7 +381,7 @@ func WorkerStatsHandler(ctx context.Context, w http.ResponseWriter, r *http.Requ
 	}
 	result := jsonutils.NewDict()
 	result.Add(jsonutils.Marshal(&stats), "workers")
-	fmt.Fprintf(w, result.String())
+	fmt.Fprintf(w, "%s", result.String())
 }
 
 func GetDBConnectionCount() int {

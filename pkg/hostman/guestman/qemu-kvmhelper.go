@@ -15,6 +15,7 @@
 package guestman
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"path"
@@ -36,6 +37,9 @@ import (
 	"yunion.io/x/onecloud/pkg/hostman/guestman/desc"
 	"yunion.io/x/onecloud/pkg/hostman/guestman/qemu"
 	qemucerts "yunion.io/x/onecloud/pkg/hostman/guestman/qemu/certs"
+	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
+	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/deployclient"
+	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/uefi"
 	"yunion.io/x/onecloud/pkg/hostman/monitor"
 	"yunion.io/x/onecloud/pkg/hostman/options"
 	"yunion.io/x/onecloud/pkg/hostman/storageman"
@@ -230,7 +234,11 @@ func (s *SKVMGuestInstance) isWindows10() bool {
 }
 
 func (s *SKVMGuestInstance) isMemcleanEnabled() bool {
-	return s.Desc.Metadata["enable_memclean"] == "true"
+	return s.Desc.Metadata[api.VM_METADATA_ENABLE_MEMCLEAN] == "true"
+}
+
+func (s *SKVMGuestInstance) isDisableAutoMergeSnapshots() bool {
+	return s.Desc.Metadata[api.VM_METADATA_DISABLE_AUTO_MERGE_SNAPSHOT] == "true"
 }
 
 func (s *SKVMGuestInstance) getMachine() string {
@@ -244,7 +252,7 @@ func (s *SKVMGuestInstance) getMachine() string {
 func (s *SKVMGuestInstance) getBios() string {
 	bios := s.Desc.Bios
 	if bios == "" {
-		bios = "bios"
+		bios = api.VM_BOOT_MODE_BIOS
 	}
 	return bios
 }
@@ -331,10 +339,12 @@ func (s *SKVMGuestInstance) extraOptions() string {
 		case *jsonutils.JSONArray:
 			for i := 0; i < jsonV.Size(); i++ {
 				vAtI, _ := jsonV.GetAt(i)
-				cmd += fmt.Sprintf(" -%s %s", k, vAtI.String())
+				vStr, _ := vAtI.GetString()
+				cmd += fmt.Sprintf(" -%s %s", k, vStr)
 			}
 		default:
-			cmd += fmt.Sprintf(" -%s %s", k, v.String())
+			vstr, _ := v.GetString()
+			cmd += fmt.Sprintf(" -%s %s", k, vstr)
 		}
 	}
 	return cmd
@@ -499,6 +509,7 @@ function nic_mtu() {
 	if s.Desc.Bios == qemu.BIOS_UEFI {
 		if len(input.OVMFPath) == 0 {
 			input.OVMFPath = options.HostOptions.OvmfPath
+			input.OVMFVarsPath = options.HostOptions.OvmfVarsPath
 		}
 	}
 
@@ -883,11 +894,13 @@ func (s *SKVMGuestInstance) initCpuDesc(cpuMax uint) error {
 	}
 	s.Desc.CpuDesc = cpuDesc
 
-	err = s.allocGuestNumaCpuset()
-	if err != nil {
-		return err
+	// if region not allocate cpu numa pin
+	if len(s.Desc.CpuNumaPin) == 0 {
+		err = s.allocGuestNumaCpuset()
+		if err != nil {
+			return err
+		}
 	}
-
 	return nil
 }
 
@@ -917,9 +930,15 @@ func (s *SKVMGuestInstance) initGuestMemObjects(memSizeMB int64) error {
 	var numaMems int64
 	var numaCpus = int(s.Desc.CpuDesc.MaxCpus) / len(s.Desc.CpuNumaPin)
 	var leastCpus = int(s.Desc.CpuDesc.MaxCpus) % len(s.Desc.CpuNumaPin)
-	var numaVcpuCount = int(s.Desc.Cpu) / len(s.Desc.CpuNumaPin)
+	var cpuStart = 0
+	var cpuEnd = numaCpus - 1
+
 	var mems = make([]desc.SMemDesc, 0)
 	for i := 0; i < len(s.Desc.CpuNumaPin); i++ {
+		if s.Desc.CpuNumaPin[i].SizeMB <= 0 {
+			continue
+		}
+
 		numaMems += s.Desc.CpuNumaPin[i].SizeMB
 		memId := "mem"
 		nodeId := uint16(i)
@@ -927,25 +946,23 @@ func (s *SKVMGuestInstance) initGuestMemObjects(memSizeMB int64) error {
 			memId += strconv.Itoa(i - 1)
 		}
 
-		vcpuCount := numaVcpuCount
 		if i == 0 {
-			vcpuCount += int(s.Desc.Cpu) % len(s.Desc.CpuNumaPin)
-		}
-
-		cpuStart := i * numaCpus
-		cpuEnd := (i+1)*numaCpus - 1
-		if i+1 == len(s.Desc.CpuNumaPin) {
 			cpuEnd += leastCpus
 		}
 		vcpus := fmt.Sprintf("%d-%d", cpuStart, cpuEnd)
-		vcpuAlloc := fmt.Sprintf("%d-%d", cpuStart, cpuStart+vcpuCount-1)
-		s.Desc.CpuNumaPin[i].Vcpus = &vcpuAlloc
 
-		if !s.Desc.CpuNumaPin[i].Regular {
+		for j := range s.Desc.CpuNumaPin[i].VcpuPin {
+			s.Desc.CpuNumaPin[i].VcpuPin[j].Vcpu = cpuStart + j
+		}
+
+		cpuStart = cpuEnd + 1
+		cpuEnd = cpuStart + numaCpus - 1
+
+		if s.Desc.CpuNumaPin[i].Unregular {
 			continue
 		}
 		memDesc := desc.NewMemDesc(s.memObjectType(), memId, &nodeId, &vcpus)
-		memDesc.Options = s.getMemObjectOptions(s.Desc.CpuNumaPin[i].SizeMB, s.Desc.Uuid, s.Desc.CpuNumaPin[i].HostNodes)
+		memDesc.Options = s.getMemObjectOptions(s.Desc.CpuNumaPin[i].SizeMB, s.Desc.Uuid, s.Desc.CpuNumaPin[i].NodeId)
 		mems = append(mems, *memDesc)
 	}
 	if len(mems) == 0 {
@@ -954,9 +971,6 @@ func (s *SKVMGuestInstance) initGuestMemObjects(memSizeMB int64) error {
 		return nil
 	}
 
-	if numaMems != memSizeMB {
-		return errors.Errorf("numa memory size not equal request mem size")
-	}
 	s.Desc.MemDesc.Mem = desc.NewMemsDesc(mems[0], mems[1:])
 	return nil
 }
@@ -1110,4 +1124,70 @@ func (s *SKVMGuestInstance) vfioDevCount() int {
 		}
 	}
 	return res
+}
+
+func (s *SKVMGuestInstance) getOvmfVarsPath() string {
+	return path.Join(s.HomeDir(), "OVMF_VARS.fd")
+}
+
+func (s *SKVMGuestInstance) getDiskBootOrderType(driver string) uefi.OvmfDevicePathType {
+	switch driver {
+	case qemu.DISK_DRIVER_VIRTIO:
+		return uefi.DEVICE_TYPE_PCI
+	case qemu.DISK_DRIVER_SCSI, qemu.DISK_DRIVER_PVSCSI:
+		return uefi.DEVICE_TYPE_SCSI
+	case qemu.DISK_DRIVER_IDE:
+		if s.manager.host.IsAarch64() {
+			return uefi.DEVICE_TYPE_SCSI
+		}
+		return uefi.DEVICE_TYPE_IDE
+	case qemu.DISK_DRIVER_SATA:
+		if s.manager.host.IsAarch64() {
+			return uefi.DEVICE_TYPE_SCSI
+		}
+		return uefi.DEVICE_TYPE_SATA
+	}
+	return uefi.DEVICE_TYPE_UNKNOWN
+}
+
+func (s *SKVMGuestInstance) getCdromBootOrder() uefi.OvmfDevicePathType {
+	if s.manager.host.IsAarch64() {
+		return uefi.DEVICE_TYPE_SCSI_CDROM
+	}
+	return uefi.DEVICE_TYPE_CDROM
+}
+
+func (s *SKVMGuestInstance) setUefiBootOrder(ctx context.Context) error {
+	params := &deployapi.OvmfBootOrderParams{
+		OvmfVarsPath: s.getOvmfVarsPath(),
+	}
+	devs := make([]*deployapi.BootDevices, 0)
+	for i := range s.Desc.Cdroms {
+		if s.Desc.Cdroms[i].BootIndex == nil || *s.Desc.Disks[i].BootIndex < 0 {
+			continue
+		}
+		dev := &deployapi.BootDevices{
+			BootOrder:   int32(*s.Desc.Cdroms[i].BootIndex),
+			AttachOrder: int32(s.Desc.Cdroms[i].Ordinal),
+			DevType:     int32(s.getCdromBootOrder()),
+		}
+		devs = append(devs, dev)
+	}
+	for i := range s.Desc.Disks {
+		if s.Desc.Disks[i].BootIndex == nil || *s.Desc.Disks[i].BootIndex < 0 {
+			continue
+		}
+		dev := &deployapi.BootDevices{
+			BootOrder:   int32(*s.Desc.Disks[i].BootIndex),
+			AttachOrder: int32(s.Desc.Disks[i].Index),
+			DevType:     int32(s.getDiskBootOrderType(s.Desc.Disks[i].Driver)),
+		}
+		devs = append(devs, dev)
+	}
+	params.Devs = devs
+	_, err := deployclient.GetDeployClient().SetOvmfBootOrder(ctx, params)
+	if err != nil {
+		return errors.Wrap(err, "SetOvmfBootOrder")
+	}
+	return nil
 }

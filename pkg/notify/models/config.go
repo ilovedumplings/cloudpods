@@ -89,13 +89,15 @@ func (cm *SConfigManager) ValidateCreateData(ctx context.Context, userCred mccli
 	}
 	driver := GetDriver(input.Type)
 	// validate
-	message, err := driver.ValidateConfig(ctx, api.NotifyConfig{
-		SNotifyConfigContent: *input.Content,
-		Attribution:          input.Attribution,
-		DomainId:             input.ProjectDomainId,
-	})
-	if err != nil {
-		return input, errors.Wrapf(err, message)
+	if input.Type != api.MOBILE {
+		message, err := driver.ValidateConfig(ctx, api.NotifyConfig{
+			SNotifyConfigContent: *input.Content,
+			Attribution:          input.Attribution,
+			DomainId:             input.ProjectDomainId,
+		})
+		if err != nil {
+			return input, errors.Wrapf(err, "%s", message)
+		}
 	}
 	if len(input.Name) == 0 {
 		input.Name = input.Type
@@ -166,13 +168,15 @@ func (c *SConfig) ValidateUpdateData(ctx context.Context, userCred mcclient.Toke
 	// check if changed
 	if input.Content != nil {
 		driver := GetDriver(c.Type)
-		message, err := driver.ValidateConfig(ctx, api.NotifyConfig{
-			DomainId:             c.DomainId,
-			Attribution:          c.Attribution,
-			SNotifyConfigContent: *input.Content,
-		})
-		if err != nil {
-			return input, errors.Wrapf(err, message)
+		if c.Type != api.MOBILE {
+			message, err := driver.ValidateConfig(ctx, api.NotifyConfig{
+				SNotifyConfigContent: *input.Content,
+				Attribution:          c.Attribution,
+				DomainId:             c.DomainId,
+			})
+			if err != nil {
+				return input, errors.Wrapf(err, "%s", message)
+			}
 		}
 	}
 	return input, nil
@@ -372,7 +376,7 @@ func (cm *SConfigManager) PerformValidate(ctx context.Context, userCred mcclient
 		DomainId:             userCred.GetDomainId(),
 	})
 	if err != nil {
-		return output, errors.Wrapf(err, message)
+		return output, errors.Wrapf(err, "%s", message)
 	}
 	output.IsValid = true
 	output.Message = message

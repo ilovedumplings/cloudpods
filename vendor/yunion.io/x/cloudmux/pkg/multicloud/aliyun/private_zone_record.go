@@ -22,6 +22,7 @@ import (
 
 	api "yunion.io/x/cloudmux/pkg/apis/compute"
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
+	"yunion.io/x/cloudmux/pkg/multicloud"
 )
 
 type SPvtzRecords struct {
@@ -34,6 +35,8 @@ type SPvtzRecords struct {
 }
 
 type SPvtzRecord struct {
+	multicloud.SDnsRecordBase
+
 	szone    *SPrivateZone
 	Status   string `json:"Status"`
 	Value    string `json:"Value"`
@@ -161,6 +164,10 @@ func (self *SPvtzRecord) GetTTL() int64 {
 
 func (self *SPvtzRecord) Delete() error {
 	return self.szone.client.DeleteZoneRecord(self.RecordId)
+}
+
+func (self *SPvtzRecord) GetExtraAddresses() ([]string, error) {
+	return []string{}, nil
 }
 
 func (self *SPvtzRecord) GetMxPriority() int64 {

@@ -167,7 +167,7 @@ func (self *SKsyunProvider) GetIProjects() ([]cloudprovider.ICloudProject, error
 }
 
 func (self *SKsyunProvider) CreateIProject(name string) (cloudprovider.ICloudProject, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	return self.client.CreateProject(name)
 }
 
 func (self *SKsyunProvider) GetStorageClasses(regionId string) []string {

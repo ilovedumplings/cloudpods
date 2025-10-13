@@ -82,9 +82,11 @@ type Command struct {
 }
 
 type NetworkModify struct {
-	Device  string `json:"device"`
-	Ipmask  string `json:"ipmask"`
-	Gateway string `json:"gateway"`
+	Device   string `json:"device"`
+	Ipmask   string `json:"ipmask"`
+	Gateway  string `json:"gateway"`
+	Ip6mask  string `json:"ip6mask"`
+	Gateway6 string `json:"gateway6"`
 }
 
 type Version struct {
@@ -677,7 +679,7 @@ func (m *QmpMonitor) GetMigrateStats(callback MigrateStatsCallback) {
 		cmd = &Command{Execute: "query-migrate"}
 		cb  = func(res *Response) {
 			if res.ErrorVal != nil {
-				callback(nil, errors.Errorf(res.ErrorVal.Error()))
+				callback(nil, errors.Errorf("%s", res.ErrorVal.Error()))
 			} else {
 				migStats := new(MigrationInfo)
 				err := json.Unmarshal(res.Return, migStats)
@@ -983,6 +985,10 @@ func (m *QmpMonitor) CancelBlockJob(driveName string, force bool, callback Strin
 	}
 	cmd += driveName
 	m.HumanMonitorCommand(cmd, callback)
+}
+
+func (m *QmpMonitor) ScreenDump(savePath string, callback StringCallback) {
+	m.HumanMonitorCommand(fmt.Sprintf("screendump %s", savePath), callback)
 }
 
 func (m *QmpMonitor) BlockJobComplete(drive string, callback StringCallback) {

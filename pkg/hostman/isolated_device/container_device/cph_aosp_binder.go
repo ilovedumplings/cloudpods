@@ -94,10 +94,10 @@ func (m *cphAOSPBinderManager) initialize(dev *isolated_device.ContainerDevice) 
 	return nil
 }
 
-func (m *cphAOSPBinderManager) NewContainerDevices(ctrInput *hostapi.ContainerCreateInput, input *hostapi.ContainerDevice) ([]*runtimeapi.Device, error) {
+func (m *cphAOSPBinderManager) NewContainerDevices(ctrInput *hostapi.ContainerCreateInput, input *hostapi.ContainerDevice) ([]*runtimeapi.Device, []*runtimeapi.Device, error) {
 	dev := input.IsolatedDevice
 	if err := m.ensureBinderDevice(ctrInput.Name, dev); err != nil {
-		return nil, errors.Wrap(err, "createBinderDevice")
+		return nil, nil, errors.Wrap(err, "createBinderDevice")
 	}
 	binderFs := "/dev/binderfs"
 	binderDev := func(devName string) string {
@@ -120,11 +120,11 @@ func (m *cphAOSPBinderManager) NewContainerDevices(ctrInput *hostapi.ContainerCr
 			Permissions:   "rwm",
 		},
 	}
-	return ctrDevs, nil
+	return ctrDevs, nil, nil
 }
 
-func (m *cphAOSPBinderManager) GetContainerEnvs(devs []*hostapi.ContainerDevice) []*runtimeapi.KeyValue {
-	return nil
+func (m *cphAOSPBinderManager) GetContainerExtraConfigures(devs []*hostapi.ContainerDevice) ([]*runtimeapi.KeyValue, []*runtimeapi.Mount) {
+	return nil, nil
 }
 
 func (m *cphAOSPBinderManager) ensureBinderDeviceOldWay(dev *hostapi.ContainerIsolatedDevice) error {
@@ -149,11 +149,11 @@ func (m *cphAOSPBinderManager) ensureBinderDevice(ctrName string, dev *hostapi.C
 	binderDev := func(devName string) string {
 		return m.getBinderHostDevPath(ctrName, devName)
 	}
-	if fileutils2.Exists(binderDev("binder")) && fileutils2.Exists(binderDev("vndbinder")) && fileutils2.Exists("hwbinder") {
+	if fileutils2.Exists(binderDev("binder")) && fileutils2.Exists(binderDev("vndbinder")) && fileutils2.Exists(binderDev("hwbinder")) {
 		return nil
 	}
-	if err := procutils.NewRemoteCommandAsFarAsPossible(binderBin, ctrName).Run(); err != nil {
-		return errors.Wrapf(err, "call command: %s %s", binderBin, ctrName)
+	if out, err := procutils.NewRemoteCommandAsFarAsPossible(binderBin, ctrName).Output(); err != nil {
+		return errors.Wrapf(err, "call command: %s %s, out: %s", binderBin, ctrName, out)
 	}
 	return nil
 }

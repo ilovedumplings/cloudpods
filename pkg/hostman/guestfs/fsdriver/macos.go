@@ -116,10 +116,6 @@ func (m *SMacOSRootFs) DeployHosts(part IDiskPartition, hn, domain string, ips [
 	return nil
 }
 
-func (m *SMacOSRootFs) DeployQgaBlackList(part IDiskPartition) error {
-	return nil
-}
-
 func (m *SMacOSRootFs) GetReleaseInfo(IDiskPartition) *deployapi.ReleaseInfo {
 	spath := "/System/Library/CoreServices/SystemVersion.plist"
 	sInfo, _ := m.rootFs.FileGetContents(spath, false)
@@ -209,4 +205,8 @@ func (m *SMacOSRootFs) CommitChanges(part IDiskPartition) error {
 	m.addScripts([]string{fmt.Sprintf("echo > %s", spath)})
 	cont = strings.Join(m.scripts, "\n") + "\n"
 	return m.rootFs.FilePutContents(spath, cont, false, false)
+}
+
+func (d *SMacOSRootFs) ConfigSshd(loginAccount, loginPassword string, sshPort int) error {
+	return nil
 }

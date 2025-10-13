@@ -1,3 +1,17 @@
+// Copyright 2019 Yunion
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package guestman
 
 import (
@@ -14,16 +28,20 @@ import (
 	"yunion.io/x/onecloud/pkg/hostman/guestman/desc"
 	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
 	"yunion.io/x/onecloud/pkg/hostman/options"
+	"yunion.io/x/onecloud/pkg/hostman/storageman"
 	"yunion.io/x/onecloud/pkg/mcclient"
+	"yunion.io/x/onecloud/pkg/util/cgrouputils/cpuset"
 	"yunion.io/x/onecloud/pkg/util/fileutils2"
 	"yunion.io/x/onecloud/pkg/util/netutils2"
 	"yunion.io/x/onecloud/pkg/util/procutils"
 )
 
 type GuestRuntimeInstance interface {
+	GetHypervisor() string
 	GetName() string
 	GetInitialId() string
 	GetId() string
+	IsValid() bool
 	HomeDir() string
 	GetDesc() *desc.SGuestDesc
 	SetDesc(guestDesc *desc.SGuestDesc)
@@ -38,17 +56,27 @@ type GuestRuntimeInstance interface {
 	IsSuspend() bool
 	IsLoaded() bool
 	GetNicDescMatch(mac, ip, port, bridge string) *desc.SGuestNetwork
+	GetIpv6NicMacs(bridge string) []string
 	CleanGuest(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
+	CleanDirtyGuest(ctx context.Context) error
 	ImportServer(pendingDelete bool)
+	ExitCleanup(bool)
 
-	HandleGuestStatus(ctx context.Context, status string, body *jsonutils.JSONDict) (jsonutils.JSONObject, error)
+	HandleGuestStatus(ctx context.Context, resp *computeapi.HostUploadGuestStatusInput, isBatch bool) *computeapi.HostUploadGuestStatusInput
+	GetUploadStatus(ctx context.Context, reason string) (*computeapi.HostUploadGuestStatusInput, error)
+	PostUploadStatus(resp *computeapi.HostUploadGuestStatusInput, reason string)
 	HandleGuestStart(ctx context.Context, userCred mcclient.TokenCredential, body jsonutils.JSONObject) (jsonutils.JSONObject, error)
 
 	HandleStop(ctx context.Context, timeout int64) error
 
 	LoadDesc() error
 	PostLoad(m *SGuestManager) error
-	SyncConfig(ctx context.Context, guestDesc *desc.SGuestDesc, fwOnly bool) (jsonutils.JSONObject, error)
+	SyncConfig(ctx context.Context, guestDesc *desc.SGuestDesc, fwOnly, setUefiBootOrder bool) (jsonutils.JSONObject, error)
+	DoSnapshot(ctx context.Context, params *SDiskSnapshot) (jsonutils.JSONObject, error)
+	DeleteSnapshot(ctx context.Context, params *SDeleteDiskSnapshot) (jsonutils.JSONObject, error)
+	OnlineResizeDisk(ctx context.Context, disk storageman.IDisk, sizeMB int64)
+
+	GetDependsImageIds(storageType string) []string
 }
 
 type sBaseGuestInstance struct {
@@ -67,6 +95,14 @@ func newBaseGuestInstance(id string, manager *SGuestManager, hypervisor string) 
 		manager:    manager,
 		Hypervisor: hypervisor,
 	}
+}
+
+func (s *sBaseGuestInstance) GetHypervisor() string {
+	return s.Hypervisor
+}
+
+func (s *sBaseGuestInstance) IsValid() bool {
+	return s.Desc != nil && s.Desc.Uuid != ""
 }
 
 func (s *sBaseGuestInstance) GetInitialId() string {
@@ -117,6 +153,10 @@ func (s *sBaseGuestInstance) IsLoaded() bool {
 	return s.Desc != nil
 }
 
+func (s *sBaseGuestInstance) IsDaemon() bool {
+	return s.Desc.IsDaemon
+}
+
 func (s *sBaseGuestInstance) GetNicDescMatch(mac, ip, port, bridge string) *desc.SGuestNetwork {
 	nics := s.Desc.Nics
 	for _, nic := range nics {
@@ -131,6 +171,97 @@ func (s *sBaseGuestInstance) GetNicDescMatch(mac, ip, port, bridge string) *desc
 		}
 	}
 	return nil
+}
+
+func (s *sBaseGuestInstance) GetIpv6NicMacs(bridge string) []string {
+	macs := []string{}
+	for _, nic := range s.Desc.Nics {
+		if nic.Bridge == bridge && len(nic.Ip6) > 0 {
+			macs = append(macs, nic.Mac)
+		}
+	}
+	return macs
+}
+
+func LoadGuestCpuset(m *SGuestManager, s GuestRuntimeInstance) error {
+	guestDesc := s.GetDesc()
+	if s.IsRunning() {
+		m.cpuSet.Lock.Lock()
+		defer m.cpuSet.Lock.Unlock()
+		m.cpuSet.GuestIds[s.GetId()] = struct{}{}
+
+		for _, vcpuPin := range guestDesc.VcpuPin {
+			pcpuSet, err := cpuset.Parse(vcpuPin.Pcpus)
+			if err != nil {
+				log.Errorf("failed parse %s pcpus: %s", s.GetName(), vcpuPin.Pcpus)
+				continue
+			}
+			vcpuSet, err := cpuset.Parse(vcpuPin.Vcpus)
+			if err != nil {
+				log.Errorf("failed parse %s vcpus: %s", s.GetName(), vcpuPin.Vcpus)
+				continue
+			}
+			m.cpuSet.LoadCpus(pcpuSet.ToSlice(), vcpuSet.Size())
+		}
+
+		for _, numaCpuset := range guestDesc.CpuNumaPin {
+			pcpus := make([]int, 0)
+			vcpus := make([]int, 0)
+			for i := range numaCpuset.VcpuPin {
+				pcpus = append(pcpus, numaCpuset.VcpuPin[i].Pcpu)
+				if numaCpuset.VcpuPin[i].Vcpu >= 0 {
+					vcpus = append(vcpus, numaCpuset.VcpuPin[i].Vcpu)
+				}
+			}
+
+			m.cpuSet.LoadNumaCpus(numaCpuset.SizeMB, int(*numaCpuset.NodeId), pcpus, len(vcpus))
+		}
+	}
+	return nil
+}
+
+func ReleaseCpuNumaPin(m *SGuestManager, cpuNumaPin []*desc.SCpuNumaPin) {
+	if !m.numaAllocate {
+		return
+	}
+
+	for _, numaCpus := range cpuNumaPin {
+		pcpus := make([]int, 0)
+		vcpus := make([]int, 0)
+		for i := range numaCpus.VcpuPin {
+			pcpus = append(pcpus, numaCpus.VcpuPin[i].Pcpu)
+			if numaCpus.VcpuPin[i].Vcpu >= 0 {
+				vcpus = append(vcpus, numaCpus.VcpuPin[i].Vcpu)
+			}
+		}
+		m.cpuSet.ReleaseNumaCpus(numaCpus.SizeMB, int(*numaCpus.NodeId), pcpus, len(vcpus))
+	}
+}
+
+func ReleaseGuestCpuset(m *SGuestManager, s GuestRuntimeInstance) {
+	m.cpuSet.Lock.Lock()
+	defer m.cpuSet.Lock.Unlock()
+	delete(m.cpuSet.GuestIds, s.GetId())
+
+	guestDesc := s.GetDesc()
+	ReleaseCpuNumaPin(m, guestDesc.CpuNumaPin)
+
+	for _, vcpuPin := range guestDesc.VcpuPin {
+		pcpuSet, err := cpuset.Parse(vcpuPin.Pcpus)
+		if err != nil {
+			log.Errorf("failed parse %s pcpus: %s", s.GetName(), vcpuPin.Pcpus)
+			continue
+		}
+		vcpuSet, err := cpuset.Parse(vcpuPin.Vcpus)
+		if err != nil {
+			log.Errorf("failed parse %s vcpus: %s", s.GetName(), vcpuPin.Vcpus)
+			continue
+		}
+		m.cpuSet.ReleaseCpus(pcpuSet.ToSlice(), vcpuSet.Size())
+	}
+	guestDesc.VcpuPin = nil
+	guestDesc.CpuNumaPin = nil
+	SaveLiveDesc(s, guestDesc)
 }
 
 type GuestRuntimeManager struct {
@@ -175,6 +306,15 @@ func (s *sBaseGuestInstance) GetVpcNIC() *desc.SGuestNetwork {
 		}
 	}
 	return nil
+}
+
+func (s *sBaseGuestInstance) UpdateLiveDesc(guestDesc *desc.SGuestDesc) {
+	// update guest live desc, don't be here update cpu and mem
+	// cpu and memory should update from SGuestHotplugCpuMemTask
+	s.Desc.SGuestControlDesc = guestDesc.SGuestControlDesc
+	s.Desc.SGuestProjectDesc = guestDesc.SGuestProjectDesc
+	s.Desc.SGuestRegionDesc = guestDesc.SGuestRegionDesc
+	s.Desc.SGuestMetaDesc = guestDesc.SGuestMetaDesc
 }
 
 func LoadDesc(s GuestRuntimeInstance) error {
@@ -266,7 +406,7 @@ func SaveLiveDesc(s GuestRuntimeInstance, guestDesc *desc.SGuestDesc) error {
 		if nic.IsDefault {
 			defaultGwCnt++
 		}
-		defNics = defNics.Add(nic.Ip, nic.Mac, nic.Gateway)
+		defNics = defNics.Add(nic.Mac, nic.Ip, nic.Gateway, nic.Ip6, nic.Gateway6, nic.IsDefault)
 	}
 
 	// there should 1 and only 1 default gateway

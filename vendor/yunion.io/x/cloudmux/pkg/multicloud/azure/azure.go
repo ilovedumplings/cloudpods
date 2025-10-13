@@ -81,8 +81,6 @@ type SAzureClient struct {
 	tokenMap    map[string]*Token
 	httpClient  *http.Client
 
-	ressourceGroups []SResourceGroup
-
 	regions  []SRegion
 	iBuckets []cloudprovider.ICloudBucket
 
@@ -152,10 +150,6 @@ func NewAzureClient(cfg *AzureClientConfig) (*SAzureClient, error) {
 	}
 	for i := range client.regions {
 		client.regions[i].client = &client
-	}
-	client.ressourceGroups, err = client.ListResourceGroups()
-	if err != nil {
-		return nil, errors.Wrapf(err, "ListResourceGroups")
 	}
 	return &client, nil
 }
@@ -474,7 +468,7 @@ func (self *SAzureClient) _apiVersion(resource string, params url.Values) string
 	} else if utils.IsInStringArray("microsoft.insights", info) {
 		return "2017-03-01-preview"
 	} else if utils.IsInStringArray("microsoft.authorization", info) {
-		return "2018-01-01-preview"
+		return "2022-04-01"
 	} else if utils.IsInStringArray("microsoft.cache", info) {
 		if utils.IsInStringArray("redisenterprise", info) {
 			return "2021-03-01"
@@ -681,12 +675,14 @@ type sMessage struct {
 	Lang  string
 	Value string
 }
+
 type sOdataError struct {
 	Code      string
 	Message   sMessage
 	RequestId string
 	Date      time.Time
 }
+
 type AzureResponseError struct {
 	OdataError sOdataError `json:"odata.error"`
 	AzureError AzureError  `json:"error"`
@@ -710,10 +706,10 @@ func (ae *AzureResponseError) ParseErrorFromJsonResponse(statusCode int, status 
 		return errors.Wrap(cloudprovider.ErrNotFound, msg)
 	}
 	if ae.AzureError.Code == "AuthorizationFailed" {
-		return errors.Wrapf(cloudprovider.ErrForbidden, jsonutils.Marshal(ae).String())
+		return errors.Wrapf(cloudprovider.ErrForbidden, "%s", jsonutils.Marshal(ae).String())
 	}
 	if ae.AzureError.Code == "ResourceCollectionRequestsThrottled" {
-		return errors.Wrapf(cloudprovider.ErrTooManyRequests, jsonutils.Marshal(ae).String())
+		return errors.Wrapf(cloudprovider.ErrTooManyRequests, "%s", jsonutils.Marshal(ae).String())
 	}
 	if len(ae.OdataError.Code) > 0 || len(ae.AzureError.Code) > 0 || (len(ae.Code) > 0 && len(ae.Message) > 0) {
 		return ae
@@ -729,7 +725,7 @@ func _jsonRequest(client *autorest.Client, method, domain, path string, body jso
 	header, body, err := cli.Send(context.TODO(), req, &ae, debug)
 	if err != nil {
 		if strings.Contains(err.Error(), "azure.BearerAuthorizer#WithAuthorization") {
-			return nil, errors.Wrapf(cloudprovider.ErrInvalidAccessKey, err.Error())
+			return nil, errors.Wrapf(cloudprovider.ErrInvalidAccessKey, "%s", err.Error())
 		}
 		return nil, err
 	}
@@ -807,9 +803,16 @@ func _jsonRequest(client *autorest.Client, method, domain, path string, body jso
 }
 
 func (self *SAzureClient) ListRegions() ([]SRegion, error) {
+	resp, err := self.list_v2("locations", "2014-02-26", nil)
+	if err != nil {
+		return nil, err
+	}
 	regions := []SRegion{}
-	err := self.list("locations", url.Values{}, &regions)
-	return regions, err
+	err = resp.Unmarshal(&regions, "value")
+	if err != nil {
+		return nil, err
+	}
+	return regions, nil
 }
 
 func (self *SAzureClient) GetRegions() []SRegion {
@@ -934,21 +937,14 @@ func getResourceGroup(id string) string {
 }
 
 func (self *SAzureClient) GetIProjects() ([]cloudprovider.ICloudProject, error) {
-	subscriptionId := self.subscriptionId
-	groups := []SResourceGroup{}
-	for _, sub := range self.subscriptions {
-		self.subscriptionId = sub.SubscriptionId
-		resourceGroups, err := self.ListResourceGroups()
-		if err != nil {
-			return nil, errors.Wrapf(err, "ListResourceGroups")
-		}
-		groups = append(groups, resourceGroups...)
+	resourceGroups, err := self.ListResourceGroups()
+	if err != nil {
+		return nil, errors.Wrapf(err, "ListResourceGroups")
 	}
-	self.subscriptionId = subscriptionId
 	iprojects := []cloudprovider.ICloudProject{}
-	for i := range groups {
-		groups[i].client = self
-		iprojects = append(iprojects, &groups[i])
+	for i := range resourceGroups {
+		resourceGroups[i].client = self
+		iprojects = append(iprojects, &resourceGroups[i])
 	}
 	return iprojects, nil
 }

@@ -17,6 +17,7 @@ package storageman
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"path"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/qemuimgfmt"
+	"yunion.io/x/pkg/util/regutils"
 
 	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
@@ -102,27 +104,29 @@ type IStorage interface {
 
 	GetSnapshotDir() string
 	GetSnapshotPathByIds(diskId, snapshotId string) string
+	DeleteSnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 	DeleteSnapshots(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 	IsSnapshotExist(diskId, snapshotId string) (bool, error)
 
 	GetBackupDir() string
-	StorageBackup(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
+	StorageBackup(ctx context.Context, params *SStorageBackup) (jsonutils.JSONObject, error)
 	StorageBackupRecovery(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 
 	GetFreeSizeMb() int
-	GetCapacity() int
+	GetCapacityMb() int
 
 	// Find owner disks first, if not found, call create disk
 	GetDiskById(diskId string) (IDisk, error)
 	CreateDisk(diskId string) IDisk
 	RemoveDisk(IDisk)
+	GetDisksPath() ([]string, error)
 
 	// DeleteDisk(ctx context.Context, params interface{}) (jsonutils.JSONObject, error)
 
 	// *SDiskCreateByDiskinfo
 	CreateDiskByDiskinfo(context.Context, interface{}) (jsonutils.JSONObject, error)
 	SaveToGlance(context.Context, interface{}) (jsonutils.JSONObject, error)
-	CreateDiskFromSnapshot(context.Context, IDisk, *SDiskCreateByDiskinfo) error
+	CreateDiskFromSnapshot(context.Context, IDisk, *SDiskCreateByDiskinfo) (jsonutils.JSONObject, error)
 	CreateDiskFromExistingPath(context.Context, IDisk, *SDiskCreateByDiskinfo) error
 	CreateDiskFromBackup(context.Context, IDisk, *SDiskCreateByDiskinfo) error
 	DiskMigrate(context.Context, interface{}) (jsonutils.JSONObject, error)
@@ -130,7 +134,7 @@ type IStorage interface {
 	// GetCloneTargetDiskPath generate target disk path by target disk id
 	GetCloneTargetDiskPath(ctx context.Context, targetDiskId string) string
 	// CloneDiskFromStorage clone disk from other storage
-	CloneDiskFromStorage(ctx context.Context, srcStorage IStorage, srcDisk IDisk, targetDiskId string, fullCopy bool) (*hostapi.ServerCloneDiskFromStorageResponse, error)
+	CloneDiskFromStorage(ctx context.Context, srcStorage IStorage, srcDisk IDisk, targetDiskId string, fullCopy bool, encInfo apis.SEncryptInfo) (*hostapi.ServerCloneDiskFromStorageResponse, error)
 
 	CreateSnapshotFormUrl(ctx context.Context, snapshotUrl, diskId, snapshotPath string) error
 
@@ -144,6 +148,8 @@ type IStorage interface {
 
 	Accessible() error
 	Detach() error
+
+	CleanRecycleDiskfiles(ctx context.Context)
 }
 
 type SBaseStorage struct {
@@ -196,7 +202,7 @@ func (s *SBaseStorage) SetStoragecacheId(storagecacheId string) {
 	s.StoragecacheId = storagecacheId
 }
 
-func (s *SBaseStorage) StorageBackup(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
+func (s *SBaseStorage) StorageBackup(ctx context.Context, params *SStorageBackup) (jsonutils.JSONObject, error) {
 	return nil, nil
 }
 
@@ -224,7 +230,23 @@ func (s *SBaseStorage) GetZoneId() string {
 	return s.Manager.GetZoneId()
 }
 
-func (s *SBaseStorage) GetCapacity() int {
+func (d *SBaseStorage) GetDisksPath() ([]string, error) {
+	spath := d.GetPath()
+	files, err := ioutil.ReadDir(spath)
+	if err != nil {
+		return nil, err
+	}
+	disksPath := make([]string, 0)
+	for i := range files {
+		if !files[i].IsDir() && regutils.MatchUUIDExact(files[i].Name()) {
+			disksPath = append(disksPath, path.Join(spath, files[i].Name()))
+		}
+	}
+
+	return disksPath, nil
+}
+
+func (s *SBaseStorage) GetCapacityMb() int {
 	return s.GetAvailSizeMb()
 }
 
@@ -281,7 +303,7 @@ func (s *SBaseStorage) SyncStorageSize() (api.SHostStorageStat, error) {
 	stat := api.SHostStorageStat{
 		StorageId: s.StorageId,
 	}
-	stat.CapacityMb = int64(s.GetCapacity())
+	stat.CapacityMb = int64(s.GetCapacityMb())
 	stat.ActualCapacityUsedMb = int64(s.GetUsedSizeMb())
 	return stat, nil
 }
@@ -353,8 +375,12 @@ func (s *SBaseStorage) CreateDiskByDiskinfo(ctx context.Context, params interfac
 		if !createParams.DiskInfo.Rebuild {
 			return nil, fmt.Errorf("Disk exist")
 		}
-		if err := createParams.Disk.OnRebuildRoot(ctx, createParams.DiskInfo); err != nil {
-			return nil, err
+		if createParams.DiskInfo.Backup != nil && createParams.DiskInfo.Backup.BackupAsTar != nil {
+			log.Infof("skip OnRebuildRoot step when backup_as_tar is provided")
+		} else {
+			if err := createParams.Disk.OnRebuildRoot(ctx, createParams.DiskInfo); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -363,7 +389,7 @@ func (s *SBaseStorage) CreateDiskByDiskinfo(ctx context.Context, params interfac
 		return nil, fmt.Errorf("Fail to Create disk %s", createParams.DiskId)
 	}
 
-	log.Infof("storage %v start create disk", createParams.Storage.StorageType())
+	log.Infof("storage %s %s(%s) start create disk", createParams.Storage.StorageType(), createParams.Storage.GetStorageName(), createParams.Storage.GetId())
 	switch {
 	case len(createParams.DiskInfo.SnapshotId) > 0:
 		log.Infof("CreateDiskFromSnpashot %s", createParams)
@@ -389,7 +415,11 @@ func (s *SBaseStorage) CreateRawDisk(ctx context.Context, disk IDisk, input *SDi
 	if input.DiskInfo.Encryption {
 		encryptInfo = &input.DiskInfo.EncryptInfo
 	}
-	return disk.CreateRaw(ctx, input.DiskInfo.DiskSizeMb, input.DiskInfo.Format, input.DiskInfo.FsFormat, encryptInfo, input.DiskId, "")
+	return disk.CreateRaw(ctx, input.DiskInfo.DiskSizeMb,
+		input.DiskInfo.Format,
+		input.DiskInfo.FsFormat,
+		input.DiskInfo.FsFeatures,
+		encryptInfo, input.DiskId, "")
 }
 
 func (s *SBaseStorage) CreateDiskFromTemplate(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) (jsonutils.JSONObject, error) {
@@ -411,12 +441,7 @@ func (s *SBaseStorage) CreateDiskFromSnpashot(ctx context.Context, disk IDisk, i
 		return nil, httperrors.NewMissingParameterError("snapshot_url")
 	}
 
-	err := storage.CreateDiskFromSnapshot(ctx, disk, input)
-	if err != nil {
-		return nil, errors.Wrapf(err, "CreateDiskFromSnapshot")
-	}
-
-	return disk.GetDiskDesc(), nil
+	return storage.CreateDiskFromSnapshot(ctx, disk, input)
 }
 
 func (s *SBaseStorage) createDiskFromExistingPath(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) (jsonutils.JSONObject, error) {
@@ -461,7 +486,7 @@ func (s *SBaseStorage) GetCloneTargetDiskPath(ctx context.Context, targetDiskId 
 }
 
 func (s *SBaseStorage) CloneDiskFromStorage(
-	ctx context.Context, srcStorage IStorage, srcDisk IDisk, targetDiskId string, fullCopy bool,
+	ctx context.Context, srcStorage IStorage, srcDisk IDisk, targetDiskId string, fullCopy bool, encInfo apis.SEncryptInfo,
 ) (*hostapi.ServerCloneDiskFromStorageResponse, error) {
 	return nil, httperrors.ErrNotImplemented
 }

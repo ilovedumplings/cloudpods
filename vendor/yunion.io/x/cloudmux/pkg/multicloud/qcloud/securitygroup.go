@@ -176,7 +176,7 @@ func (self *SRegion) GetSecurityGroup(id string) (*SSecurityGroup, error) {
 			return &groups[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 }
 
 func (self *SRegion) DeleteSecurityGroup(secGroupId string) error {
@@ -337,6 +337,9 @@ func (self *SRegion) CreateSecurityGroupRule(groupId string, opts *cloudprovider
 	action := "accept"
 	if opts.Action == secrules.SecurityRuleDeny {
 		action = "drop"
+	}
+	if len(opts.CIDR) == 0 {
+		opts.CIDR = "0.0.0.0/0"
 	}
 	params := map[string]string{
 		"SecurityGroupId":            groupId,

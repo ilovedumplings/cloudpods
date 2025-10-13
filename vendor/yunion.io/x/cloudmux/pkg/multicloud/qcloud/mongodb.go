@@ -115,8 +115,10 @@ func (self *SMongoDB) GetName() string {
 
 func (self *SMongoDB) GetStatus() string {
 	switch self.Status {
-	case 0, 1:
+	case 0:
 		return api.MONGO_DB_STATUS_CREATING
+	case 1:
+		return api.MONGO_DB_STATUS_PROCESSING
 	case 2:
 		return api.MONGO_DB_STATUS_RUNNING
 	case -2, -3:
@@ -394,7 +396,7 @@ func (self *SRegion) GetMongoDB(id string) (*SMongoDB, error) {
 		dbs[i].region = self
 		return &dbs[i], nil
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 }
 
 func (self *SRegion) GetICloudMongoDBById(id string) (cloudprovider.ICloudMongoDB, error) {

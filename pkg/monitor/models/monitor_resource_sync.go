@@ -48,7 +48,7 @@ func RegistryResourceSync(sync IResourceSync) error {
 		resourceSyncMap = make(map[string]IResourceSync)
 	}
 	if _, ok := resourceSyncMap[sync.SyncType()]; ok {
-		return errors.Errorf(fmt.Sprintf("syncType:%s has registered", sync.SyncType()))
+		return errors.Errorf("syncType:%s has registered", sync.SyncType())
 	}
 	resourceSyncMap[sync.SyncType()] = sync
 	return nil
@@ -218,7 +218,7 @@ func (self *SyncObject) SyncResources(ctx context.Context, userCred mcclient.Tok
 	log.Errorf("start sync %s", self.sync.SyncType())
 	resources, err := GetOnecloudResources(self.sync.SyncType())
 	if err != nil {
-		return errors.Wrapf(err, fmt.Sprintf("syncType:%s GetOnecloudResources err", self.sync.SyncType()))
+		return errors.Wrapf(err, "syncType:%s GetOnecloudResources err", self.sync.SyncType())
 	}
 	input := monitor.MonitorResourceListInput{
 		OnlyResId: true,
@@ -287,6 +287,13 @@ func (self *SyncObject) newMonitorResourceCreateInput(input jsonutils.JSONObject
 	return monitorResource
 }
 
+func SetQueryHostType(q *jsonutils.JSONDict) {
+	q.Set("filter", jsonutils.NewString(
+		fmt.Sprintf("host_type.in(%s,%s)",
+			hostconsts.TELEGRAF_TAG_KEY_HYPERVISOR,
+			hostconsts.TELEGRAF_TAG_KEY_CONTAINER)))
+}
+
 func GetOnecloudResources(resTyep string) ([]jsonutils.JSONObject, error) {
 	var err error
 	allResources := make([]jsonutils.JSONObject, 0)
@@ -296,7 +303,6 @@ func GetOnecloudResources(resTyep string) ([]jsonutils.JSONObject, error) {
 	query.Add(jsonutils.NewString("true"), "admin")
 	switch resTyep {
 	case monitor.METRIC_RES_TYPE_HOST:
-		//query.Set("host-type", jsonutils.NewString(hostconsts.TELEGRAF_TAG_KEY_HYPERVISOR))
 		allResources, err = ListAllResources(&mc_mds.Hosts, query)
 	case monitor.METRIC_RES_TYPE_GUEST:
 		allResources, err = ListAllResources(&mc_mds.Servers, query)
@@ -321,8 +327,8 @@ func GetOnecloudResources(resTyep string) ([]jsonutils.JSONObject, error) {
 		allResources, err = ListAllResources(&mc_mds.Storages, query)
 	default:
 		query := jsonutils.NewDict()
-		query.Set("brand", jsonutils.NewString(hostconsts.TELEGRAF_TAG_ONECLOUD_BRAND))
-		query.Set("host-type", jsonutils.NewString(hostconsts.TELEGRAF_TAG_KEY_HYPERVISOR))
+		// query.Set("brand", jsonutils.NewString(hostconsts.TELEGRAF_TAG_ONECLOUD_BRAND))
+		// SetQueryHostType(query)
 		allResources, err = ListAllResources(&mc_mds.Hosts, query)
 	}
 
@@ -348,9 +354,7 @@ func ListAllResources(manager modulebase.Manager, params *jsonutils.JSONDict) ([
 		if err != nil {
 			return nil, errors.Wrapf(err, "list %s resources with params %s", manager.KeyString(), params.String())
 		}
-		for _, data := range result.Data {
-			objs = append(objs, data)
-		}
+		objs = append(objs, result.Data...)
 		total := result.Total
 		count = count + len(result.Data)
 		if count >= total {

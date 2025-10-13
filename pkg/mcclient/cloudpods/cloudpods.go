@@ -50,6 +50,7 @@ type ModelManager interface {
 	List(session *mcclient.ClientSession, params jsonutils.JSONObject) (*printutils.ListResult, error)
 	Create(session *mcclient.ClientSession, params jsonutils.JSONObject) (jsonutils.JSONObject, error)
 	Delete(session *mcclient.ClientSession, id string, param jsonutils.JSONObject) (jsonutils.JSONObject, error)
+	DeleteWithParam(session *mcclient.ClientSession, id string, query jsonutils.JSONObject, body jsonutils.JSONObject) (jsonutils.JSONObject, error)
 	PerformAction(session *mcclient.ClientSession, id string, action string, params jsonutils.JSONObject) (jsonutils.JSONObject, error)
 	Get(session *mcclient.ClientSession, id string, params jsonutils.JSONObject) (jsonutils.JSONObject, error)
 	Update(session *mcclient.ClientSession, id string, params jsonutils.JSONObject) (jsonutils.JSONObject, error)
@@ -113,7 +114,7 @@ func (self *SCloudpodsClient) auth() error {
 	token, err := client.AuthenticateByAccessKey(self.accessKey, self.accessSecret, "cli")
 	if err != nil {
 		if errors.Cause(err) == cloudprovider.ErrUnauthorized {
-			return errors.Wrapf(cloudprovider.ErrInvalidAccessKey, err.Error())
+			return errors.Wrapf(cloudprovider.ErrInvalidAccessKey, "%v", err)
 		}
 		return err
 	}
@@ -123,7 +124,11 @@ func (self *SCloudpodsClient) auth() error {
 			serviceRegion = region
 		}
 	}
-	self.s = client.NewSession(context.Background(), serviceRegion, "", "publicURL", token)
+	endpoint := "publicURL"
+	if strings.Contains(self.authURL, "api/s/identity/v3") {
+		endpoint = "apigateway"
+	}
+	self.s = client.NewSession(context.Background(), serviceRegion, "", endpoint, token)
 	if !self.s.GetToken().HasSystemAdminPrivilege() {
 		return fmt.Errorf("no system admin privilege")
 	}
@@ -156,7 +161,7 @@ func (self *SCloudpodsClient) get(manager ModelManager, id string, params map[st
 	resp, err := manager.Get(self.s, id, body)
 	if err != nil {
 		if strings.Contains(err.Error(), "NotFoundError") {
-			return errors.Wrapf(cloudprovider.ErrNotFound, err.Error())
+			return errors.Wrapf(cloudprovider.ErrNotFound, "%v", err)
 		}
 		return errors.Wrapf(err, "Get(%s)", id)
 	}
@@ -176,7 +181,7 @@ func (self *SCloudpodsClient) delete(manager ModelManager, id string) error {
 		return nil
 	}
 	params := map[string]interface{}{"override_pending_delete": true}
-	_, err := manager.Delete(self.s, id, jsonutils.Marshal(params))
+	_, err := manager.DeleteWithParam(self.s, id, jsonutils.Marshal(params), nil)
 	return err
 }
 
@@ -260,7 +265,7 @@ func (self *SCloudpodsClient) GetIRegionById(id string) (cloudprovider.ICloudReg
 			return &regions[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 }
 
 func (self *SCloudpodsClient) GetIRegions() ([]cloudprovider.ICloudRegion, error) {
@@ -290,6 +295,7 @@ func (self *SCloudpodsClient) GetCapabilities() []string {
 		cloudprovider.CLOUD_CAPABILITY_PROJECT + cloudprovider.READ_ONLY_SUFFIX,
 		cloudprovider.CLOUD_CAPABILITY_COMPUTE,
 		cloudprovider.CLOUD_CAPABILITY_NETWORK,
+		cloudprovider.CLOUD_CAPABILITY_SECURITY_GROUP,
 		cloudprovider.CLOUD_CAPABILITY_EIP,
 	}
 }

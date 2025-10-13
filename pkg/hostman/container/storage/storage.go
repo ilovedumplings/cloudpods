@@ -15,15 +15,13 @@
 package storage
 
 import (
-	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 
-	"yunion.io/x/onecloud/pkg/util/fileutils2"
+	"yunion.io/x/onecloud/pkg/util/mountutils"
 	"yunion.io/x/onecloud/pkg/util/procutils"
 )
 
@@ -58,37 +56,52 @@ func RegisterDriver(drv IContainerStorage) {
 }
 
 func Mount(devPath string, mountPoint string, fsType string) error {
-	if !fileutils2.Exists(mountPoint) {
-		output, err := procutils.NewCommand("mkdir", "-p", mountPoint).Output()
-		if err != nil {
-			return errors.Wrapf(err, "mkdir %s failed: %s", mountPoint, output)
-		}
-	}
-	if err := procutils.NewRemoteCommandAsFarAsPossible("mountpoint", mountPoint).Run(); err == nil {
-		log.Warningf("mountpoint %s is already mounted", mountPoint)
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if out, err := procutils.NewRemoteCommandContextAsFarAsPossible(ctx, "mount", "-t", fsType, devPath, mountPoint).Output(); err != nil {
-		return errors.Wrapf(err, "mount %s to %s with fs %s: %s", devPath, mountPoint, fsType, string(out))
-	}
-	return nil
+	return mountutils.Mount(devPath, mountPoint, fsType)
 }
 
-func Unmount(mountPoint string) error {
-	mountOut, err := procutils.NewRemoteCommandAsFarAsPossible("mountpoint", mountPoint).Output()
+func MountWithResId(devPath string, mountPoint string, fsType string, resUid int, resGid int) error {
+	opts := []string{}
+	if resUid > 0 {
+		opts = append(opts, fmt.Sprintf("resuid=%d", resUid))
+	}
+	if resGid > 0 {
+		opts = append(opts, fmt.Sprintf("resgid=%d", resGid))
+	}
+	optStr := strings.Join(opts, ",")
+	params := []string{}
+	if len(optStr) > 0 {
+		params = []string{"-o", optStr}
+	}
+	return mountutils.MountWithParams(devPath, mountPoint, fsType, params)
+}
+
+func Unmount(devPath string) error {
+	return mountutils.Unmount(devPath, false)
+}
+
+func UnmountWithSubDirs(devPath string) error {
+	err := mountutils.Unmount(devPath, false)
 	if err == nil {
-		out, err := procutils.NewRemoteCommandAsFarAsPossible("umount", mountPoint).Output()
-		if err != nil {
-			return errors.Wrapf(err, "umount %s failed %s", mountPoint, out)
+		return nil
+	}
+	if !strings.Contains(err.Error(), "target is busy") {
+		return err
+	}
+	// found mountpoints starts with devPath
+	out, err2 := procutils.NewRemoteCommandAsFarAsPossible("sh", "-c", fmt.Sprintf("mount | grep ' %s/' | awk '{print $3}'", devPath)).Output()
+	if err2 == nil && len(out) != 0 {
+		mntPoints := strings.Split(string(out), "\n")
+		for _, mntPoint := range mntPoints {
+			if mntPoint != "" {
+				if err := mountutils.Unmount(mntPoint, false); err != nil {
+					return errors.Wrapf(err, "umount subdir %s", mntPoint)
+				}
+				log.Infof("unmount subdir %q", mntPoint)
+			}
 		}
 	}
-	if strings.Contains(string(mountOut), "No such file or directory") {
-		return nil
+	if err := Unmount(devPath); err != nil {
+		return errors.Wrapf(err, "unmount %q again", devPath)
 	}
-	if strings.Contains(string(mountOut), "not a mountpoint") {
-		return nil
-	}
-	return errors.Wrapf(err, "check mountpoint %s: %s", mountPoint, string(mountOut))
+	return nil
 }

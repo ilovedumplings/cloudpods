@@ -92,6 +92,8 @@ type SBucket struct {
 	ObjectCntLimit int   `nullable:"false" default:"0" list:"user"`
 
 	AccessUrls jsonutils.JSONObject `nullable:"true" list:"user"`
+
+	EnablePerfMon bool `default:"false" list:"user" update:"user" create:"optional"`
 }
 
 func (manager *SBucketManager) SetHandlerProcessTimeout(info *appsrv.SHandlerInfo, r *http.Request) time.Duration {
@@ -151,7 +153,7 @@ func (manager *SBucketManager) syncBuckets(ctx context.Context, userCred mcclien
 	}
 	if !xor {
 		for i := 0; i < len(commondb); i += 1 {
-			err = commondb[i].syncWithCloudBucket(ctx, userCred, commonext[i], provider, false)
+			err = commondb[i].SyncWithCloudBucket(ctx, userCred, commonext[i], false)
 			if err != nil {
 				syncResult.UpdateError(err)
 			} else {
@@ -274,11 +276,10 @@ func (bucket *SBucket) GetShortDesc(ctx context.Context) *jsonutils.JSONDict {
 	return desc
 }
 
-func (bucket *SBucket) syncWithCloudBucket(
+func (bucket *SBucket) SyncWithCloudBucket(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
 	extBucket cloudprovider.ICloudBucket,
-	provider *SCloudprovider,
 	statsOnly bool,
 ) error {
 	oStats := bucket.getStats()
@@ -291,6 +292,11 @@ func (bucket *SBucket) syncWithCloudBucket(
 		bucket.ObjectCnt = stats.ObjectCount
 		if bucket.ObjectCnt < 0 {
 			bucket.ObjectCnt = 0
+		}
+
+		created := extBucket.GetCreatedAt()
+		if !created.IsZero() {
+			bucket.CreatedAt = created
 		}
 
 		if !statsOnly {
@@ -334,6 +340,7 @@ func (bucket *SBucket) syncWithCloudBucket(
 		db.OpsLog.LogEvent(bucket, api.BUCKET_OPS_STATS_CHANGE, bucket.GetShortDesc(ctx), userCred)
 	}
 
+	provider := bucket.GetCloudprovider()
 	if provider != nil {
 		SyncCloudProject(ctx, userCred, bucket, provider.GetOwnerId(), extBucket, provider)
 		bucket.SyncShareState(ctx, userCred, provider.getAccountShareInfo())
@@ -569,9 +576,9 @@ func (bucket *SBucket) RemoteCreate(ctx context.Context, userCred mcclient.Token
 			logclient.AddSimpleActionLog(bucket, logclient.ACT_UPDATE_TAGS, err, userCred, false)
 		}
 	}
-	err = bucket.syncWithCloudBucket(ctx, userCred, extBucket, nil, false)
+	err = bucket.SyncWithCloudBucket(ctx, userCred, extBucket, false)
 	if err != nil {
-		return errors.Wrap(err, "bucket.syncWithCloudBucket")
+		return errors.Wrap(err, "SyncWithCloudBucket")
 	}
 	return nil
 }
@@ -692,6 +699,15 @@ func (manager *SBucketManager) QueryDistinctExtraField(q *sqlchemy.SQuery, field
 		return q, nil
 	}
 	q, err = manager.SCloudregionResourceBaseManager.QueryDistinctExtraField(q, field)
+	if err == nil {
+		return q, nil
+	}
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SBucketManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
 	if err == nil {
 		return q, nil
 	}
@@ -868,7 +884,7 @@ func (bucket *SBucket) PerformMakedir(
 	db.OpsLog.LogEvent(bucket, db.ACT_MKDIR, key, userCred)
 	logclient.AddActionLogWithContext(ctx, bucket, logclient.ACT_MKDIR, key, userCred, true)
 
-	bucket.syncWithCloudBucket(ctx, userCred, iBucket, nil, true)
+	bucket.SyncWithCloudBucket(ctx, userCred, iBucket, true)
 
 	quotas.CancelPendingUsage(ctx, userCred, &pendingUsage, &pendingUsage, true)
 
@@ -914,7 +930,7 @@ func (bucket *SBucket) PerformDelete(
 	db.OpsLog.LogEvent(bucket, db.ACT_DELETE_OBJECT, keyStrs, userCred)
 	logclient.AddActionLogWithContext(ctx, bucket, logclient.ACT_DELETE_OBJECT, keyStrs, userCred, true)
 
-	bucket.syncWithCloudBucket(ctx, userCred, iBucket, nil, true)
+	bucket.SyncWithCloudBucket(ctx, userCred, iBucket, true)
 
 	return modulebase.SubmitResults2JSON(results), nil
 }
@@ -1024,7 +1040,7 @@ func (bucket *SBucket) PerformUpload(
 	db.OpsLog.LogEvent(bucket, db.ACT_UPLOAD_OBJECT, key, userCred)
 	logclient.AddActionLogWithContext(ctx, bucket, logclient.ACT_UPLOAD_OBJECT, key, userCred, true)
 
-	bucket.syncWithCloudBucket(ctx, userCred, iBucket, nil, true)
+	bucket.SyncWithCloudBucket(ctx, userCred, iBucket, true)
 
 	if !pendingUsage.IsEmpty() {
 		quotas.CancelPendingUsage(ctx, userCred, &pendingUsage, &pendingUsage, true)
@@ -1066,7 +1082,7 @@ func (bucket *SBucket) PerformAcl(
 			return nil, httperrors.NewInternalServerError("setAcl error %s", err)
 		}
 
-		err = bucket.syncWithCloudBucket(ctx, userCred, iBucket, nil, false)
+		err = bucket.SyncWithCloudBucket(ctx, userCred, iBucket, false)
 		if err != nil {
 			return nil, httperrors.NewInternalServerError("syncWithCloudBucket error %s", err)
 		}
@@ -1130,7 +1146,7 @@ func (bucket *SBucket) PerformSync(
 		return nil, errors.Wrap(err, "GetIBucket")
 	}
 
-	err = bucket.syncWithCloudBucket(ctx, userCred, iBucket, nil, statsOnly)
+	err = bucket.SyncWithCloudBucket(ctx, userCred, iBucket, statsOnly)
 	if err != nil {
 		return nil, httperrors.NewInternalServerError("syncWithCloudBucket error %s", err)
 	}

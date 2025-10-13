@@ -79,8 +79,8 @@ func (self *SVirtualizedGuestDriver) GetNamedNetworkConfiguration(guest *models.
 	return net, nicConfs, api.IPAllocationStepdown, false, nil
 }
 
-func (self *SVirtualizedGuestDriver) GetRandomNetworkTypes() []string {
-	return []string{api.NETWORK_TYPE_GUEST}
+func (self *SVirtualizedGuestDriver) GetRandomNetworkTypes() []api.TNetworkType {
+	return []api.TNetworkType{api.NETWORK_TYPE_GUEST}
 }
 
 func (self *SVirtualizedGuestDriver) wireAvaiableForGuest(guest *models.SGuest, wire *models.SWire) (bool, error) {
@@ -100,9 +100,13 @@ func (self *SVirtualizedGuestDriver) Attach2RandomNetwork(guest *models.SGuest, 
 	}
 	hostNetifs := host.GetHostNetInterfaces()
 	netsAvaiable := make([]models.SNetwork, 0)
-	netTypes := guest.GetDriver().GetRandomNetworkTypes()
+	driver, err := guest.GetDriver()
+	if err != nil {
+		return nil, err
+	}
+	netTypes := driver.GetRandomNetworkTypes()
 	if len(netConfig.NetType) > 0 {
-		netTypes = []string{netConfig.NetType}
+		netTypes = []api.TNetworkType{api.TNetworkType(netConfig.NetType)}
 	}
 
 	var sriovWires []string
@@ -205,6 +209,7 @@ func (self *SVirtualizedGuestDriver) Attach2RandomNetwork(guest *models.SGuest, 
 		AllocDir:            api.IPAllocationDefault,
 		RequireDesignatedIP: netConfig.RequireDesignatedIP,
 		RequireIPv6:         netConfig.RequireIPv6,
+		StrictIPv6:          netConfig.StrictIPv6,
 		NicConfs:            nicConfs,
 
 		IsDefault: netConfig.IsDefault,
@@ -285,7 +290,7 @@ func (self *SVirtualizedGuestDriver) RequestStopGuestForDelete(ctx context.Conte
 		host, _ = guest.GetHost()
 	}
 	if host != nil && host.GetEnabled() && host.HostStatus == api.HOST_ONLINE {
-		return guest.StartGuestStopTask(ctx, task.GetUserCred(), true, false, task.GetTaskId())
+		return guest.StartGuestStopTask(ctx, task.GetUserCred(), 0, true, false, task.GetTaskId())
 	}
 	if host != nil && !jsonutils.QueryBoolean(task.GetParams(), "purge", false) {
 		return fmt.Errorf("fail to contact host")
@@ -314,8 +319,8 @@ func (self *SVirtualizedGuestDriver) ValidateCreateDataOnHost(ctx context.Contex
 	return input, nil
 }
 
-func (self *SVirtualizedGuestDriver) PerformStart(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, data *jsonutils.JSONDict) error {
-	return guest.StartGueststartTask(ctx, userCred, data, "")
+func (self *SVirtualizedGuestDriver) PerformStart(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, data *jsonutils.JSONDict, parentTaskId string) error {
+	return guest.StartGueststartTask(ctx, userCred, data, parentTaskId)
 }
 
 func (self *SVirtualizedGuestDriver) CheckDiskTemplateOnStorage(ctx context.Context, userCred mcclient.TokenCredential, imageId string, format string, storageId string, task taskman.ITask) error {

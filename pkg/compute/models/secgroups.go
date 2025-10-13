@@ -50,6 +50,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=secgroup
+// +onecloud:swagger-gen-model-plural=secgroups
 type SSecurityGroupManager struct {
 	db.SSharableVirtualResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -281,6 +283,15 @@ func (manager *SSecurityGroupManager) QueryDistinctExtraField(q *sqlchemy.SQuery
 		return q, nil
 	}
 
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SSecurityGroupManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
+	}
 	return q, httperrors.ErrNotFound
 }
 
@@ -584,6 +595,9 @@ func totalSecurityGroupCount(scope rbacscope.TRbacScope, ownerId mcclient.IIdent
 }
 
 func (self *SSecurityGroup) PerformSyncstatus(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input *api.SecurityGroupSyncstatusInput) (jsonutils.JSONObject, error) {
+	if !self.IsManaged() {
+		return nil, self.SetStatus(ctx, userCred, api.SECGROUP_STATUS_READY, "")
+	}
 	return nil, self.StartSecurityGroupSyncTask(ctx, userCred, "")
 }
 
@@ -829,7 +843,8 @@ func (manager *SSecurityGroupManager) InitializeData() error {
 		defRule.Direction = secrules.DIR_IN
 		defRule.Protocol = secrules.PROTO_ANY
 		defRule.Priority = 1
-		defRule.CIDR = "0.0.0.0/0"
+		// empty CIDR means ::/0 or 0.0.0.0/0
+		defRule.CIDR = "" // "0.0.0.0/0"
 		defRule.Action = string(secrules.SecurityRuleAllow)
 		defRule.SecgroupId = api.SECGROUP_DEFAULT_ID
 		err = SecurityGroupRuleManager.TableSpec().Insert(context.TODO(), &defRule)
@@ -838,7 +853,7 @@ func (manager *SSecurityGroupManager) InitializeData() error {
 		}
 	}
 	guests := make([]SGuest, 0)
-	q := GuestManager.Query().Equals("hypervisor", api.HYPERVISOR_KVM).IsNullOrEmpty("secgrp_id")
+	q := GuestManager.Query().Equals("hypervisor", api.HYPERVISOR_KVM).IsNotEmpty("external_id").IsNullOrEmpty("secgrp_id")
 	err = db.FetchModelObjects(GuestManager, q, &guests)
 	if err != nil {
 		log.Errorf("fetch guests without secgroup fail %s", err)
@@ -850,36 +865,36 @@ func (manager *SSecurityGroupManager) InitializeData() error {
 			return nil
 		})
 	}
-	if options.Options.CleanUselessKvmSecurityGroup {
-		q := SecurityGroupManager.Query()
-		q = q.Filter(
-			sqlchemy.AND(
-				sqlchemy.Equals(q.Field("cloudregion_id"), api.DEFAULT_REGION_ID),
-				sqlchemy.NotEquals(q.Field("id"), api.SECGROUP_DEFAULT_ID),
-				sqlchemy.NotIn(q.Field("id"), GuestManager.Query("secgrp_id").IsNotNull("secgrp_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), GuestManager.Query("admin_secgrp_id").IsNotNull("admin_secgrp_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), GuestsecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), GuestsecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), DBInstanceSecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
-				sqlchemy.NotIn(q.Field("id"), ElasticcachesecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
-			),
-		)
-		secgroups := []SSecurityGroup{}
-		err := db.FetchModelObjects(SecurityGroupManager, q, &secgroups)
+	return nil
+}
+
+func (manager *SSecurityGroupManager) PerformClean(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
+	q := SecurityGroupManager.Query()
+	q = q.Filter(
+		sqlchemy.AND(
+			sqlchemy.Equals(q.Field("cloudregion_id"), api.DEFAULT_REGION_ID),
+			sqlchemy.NotEquals(q.Field("id"), api.SECGROUP_DEFAULT_ID),
+			sqlchemy.NotIn(q.Field("id"), GuestManager.Query("secgrp_id").IsNotNull("secgrp_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), GuestManager.Query("admin_secgrp_id").IsNotNull("admin_secgrp_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), GuestsecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), GuestsecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), DBInstanceSecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), ElasticcachesecgroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+			sqlchemy.NotIn(q.Field("id"), LoadbalancerSecurityGroupManager.Query("secgroup_id").IsNotNull("secgroup_id").SubQuery()),
+		),
+	)
+	secgroups := []SSecurityGroup{}
+	err := db.FetchModelObjects(SecurityGroupManager, q, &secgroups)
+	if err != nil {
+		return nil, errors.Wrapf(err, "FetchModelObjects")
+	}
+	for i := range secgroups {
+		err = secgroups[i].RealDelete(ctx, userCred)
 		if err != nil {
-			return err
-		}
-		ctx := context.Background()
-		ctx = context.WithValue(ctx, "clean", "kvm security groups")
-		userCred := auth.GetAdminSession(ctx, options.Options.Region).GetToken()
-		for i := range secgroups {
-			err = secgroups[i].RealDelete(ctx, userCred)
-			if err != nil {
-				return err
-			}
+			return nil, errors.Wrapf(err, "delete %s", secgroups[i].Name)
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func (self *SSecurityGroup) GetRegionDriver() (IRegionDriver, error) {
@@ -932,7 +947,7 @@ func (self *SSecurityGroup) GetISecurityGroup(ctx context.Context) (cloudprovide
 				return securityGroups[i], nil
 			}
 		}
-		return nil, errors.Wrapf(cloudprovider.ErrNotFound, self.ExternalId)
+		return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%v", self.ExternalId)
 	}
 	iRegion, err := self.GetIRegion(ctx)
 	if err != nil {
@@ -1032,8 +1047,20 @@ func (self *SSecurityGroup) ValidateDeleteCondition(ctx context.Context, info ap
 	if self.Id == options.Options.DefaultSecurityGroupId {
 		return httperrors.NewProtectedResourceError("not allow to delete default security group")
 	}
+	if self.Id == options.Options.DefaultSecurityGroupIdForKvm {
+		return httperrors.NewProtectedResourceError("not allow to delete default security group for kvm")
+	}
+	if self.Id == options.Options.DefaultSecurityGroupIdForContainer {
+		return httperrors.NewProtectedResourceError("not allow to delete default security group for container")
+	}
 	if self.Id == options.Options.DefaultAdminSecurityGroupId {
 		return httperrors.NewProtectedResourceError("not allow to delete default admin security group")
+	}
+	if self.Id == options.Options.DefaultAdminSecurityGroupIdForKvm {
+		return httperrors.NewProtectedResourceError("not allow to delete default admin security group for kvm")
+	}
+	if self.Id == options.Options.DefaultAdminSecurityGroupIdForContainer {
+		return httperrors.NewProtectedResourceError("not allow to delete default admin security group for container")
 	}
 	if info.TotalCnt > 0 {
 		return httperrors.NewNotEmptyError("the security group %s is in use cnt: %d", self.Id, info.TotalCnt)

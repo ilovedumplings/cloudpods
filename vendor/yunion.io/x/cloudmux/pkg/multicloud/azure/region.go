@@ -23,6 +23,7 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/gotypes"
 	"yunion.io/x/pkg/util/netutils"
 
 	api "yunion.io/x/cloudmux/pkg/apis/compute"
@@ -43,8 +44,7 @@ type SRegion struct {
 	multicloud.SRegion
 	client *SAzureClient
 
-	storageCache    *SStoragecache
-	appServicePlans map[string]*SAppServicePlan
+	storageCache *SStoragecache
 
 	ID          string
 	Name        string
@@ -53,7 +53,7 @@ type SRegion struct {
 	Longitude   string
 }
 
-/////////////////////////////////////////////////////////////////////////////
+// ///////////////////////////////////////////////////////////////////////////
 func (self *SRegion) Refresh() error {
 	// do nothing
 	return nil
@@ -93,7 +93,7 @@ func (self *SRegion) getVMSize(name string) (*SVMSize, error) {
 			return &vmSizes[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, name)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", name)
 }
 
 func (self *SRegion) GetId() string {
@@ -400,57 +400,17 @@ func (region *SRegion) CreateISecurityGroup(opts *cloudprovider.SecurityGroupCre
 	return region.CreateSecurityGroup(opts)
 }
 
-func (region *SRegion) getIAppLBs() ([]cloudprovider.ICloudLoadbalancer, error) {
-	lbs := []SLoadbalancer{}
-	params := url.Values{}
-	params.Set("api-version", "2021-02-01")
-	err := region.list("Microsoft.Network/applicationGateways", params, &lbs)
-	if err != nil {
-		return nil, errors.Wrapf(err, "list")
-	}
-
-	ilbs := make([]cloudprovider.ICloudLoadbalancer, len(lbs))
-	for i := range lbs {
-		lbs[i].region = region
-		ilbs[i] = &lbs[i]
-	}
-
-	return ilbs, nil
-}
-
-func (region *SRegion) getINetworkLBs() ([]cloudprovider.ICloudLoadbalancer, error) {
-	lbs := []SLoadbalancer{}
-	params := url.Values{}
-	params.Set("api-version", "2021-02-01")
-	err := region.list("Microsoft.Network/loadBalancers", params, &lbs)
-	if err != nil {
-		return nil, errors.Wrapf(err, "list")
-	}
-
-	ilbs := make([]cloudprovider.ICloudLoadbalancer, len(lbs))
-	for i := range lbs {
-		lbs[i].region = region
-		ilbs[i] = &lbs[i]
-	}
-
-	return ilbs, nil
-}
-
 func (region *SRegion) GetILoadBalancers() ([]cloudprovider.ICloudLoadbalancer, error) {
-	appLbs, err := region.getIAppLBs()
+	lbs, err := region.GetLoadbalancers()
 	if err != nil {
-		return nil, errors.Wrap(err, "GetIAppLBs")
+		return nil, err
 	}
-
-	netLbs, err := region.getINetworkLBs()
-	if err != nil {
-		return nil, errors.Wrap(err, "GetINetworkLBs")
+	ret := []cloudprovider.ICloudLoadbalancer{}
+	for i := range lbs {
+		lbs[i].region = region
+		ret = append(ret, &lbs[i])
 	}
-
-	lbs := []cloudprovider.ICloudLoadbalancer{}
-	lbs = append(lbs, appLbs...)
-	lbs = append(lbs, netLbs...)
-	return lbs, nil
+	return ret, nil
 }
 
 func (region *SRegion) GetILoadBalancerById(loadbalancerId string) (cloudprovider.ICloudLoadbalancer, error) {
@@ -473,33 +433,34 @@ func (region *SRegion) GetILoadBalancerAclById(aclId string) (cloudprovider.IClo
 func (region *SRegion) GetILoadBalancerCertificateById(certId string) (cloudprovider.ICloudLoadbalancerCertificate, error) {
 	segs := strings.Split(certId, "/sslCertificates")
 	if len(segs[0]) > 0 {
-		lb, err := region.GetILoadBalancerById(segs[0])
+		lb, err := region.GetLoadbalancer(segs[0])
 		if err != nil {
 			return nil, errors.Wrap(err, "GetILoadBalancerById")
 		}
-
-		return lb.(*SLoadbalancer).GetILoadBalancerCertificateById(certId)
+		for i := range lb.Properties.SSLCertificates {
+			ssl := &lb.Properties.SSLCertificates[i]
+			ssl.region = region
+			if ssl.GetGlobalId() == certId {
+				return ssl, nil
+			}
+		}
 	}
-
-	return nil, errors.Wrap(cloudprovider.ErrNotFound, "GetILoadBalancerCertificateById")
+	return nil, errors.Wrap(cloudprovider.ErrNotFound, certId)
 }
 
 func (region *SRegion) GetILoadBalancerCertificates() ([]cloudprovider.ICloudLoadbalancerCertificate, error) {
-	lbs, err := region.GetILoadBalancers()
+	lbs, err := region.GetLoadbalancerCertificates()
 	if err != nil {
 		return nil, errors.Wrap(err, "GetILoadBalancers")
 	}
 
-	certs := []cloudprovider.ICloudLoadbalancerCertificate{}
+	ret := []cloudprovider.ICloudLoadbalancerCertificate{}
 	for i := range lbs {
-		_certs, err := lbs[i].(*SLoadbalancer).GetILoadBalancerCertificates()
-		if err != nil {
-			return nil, errors.Wrap(err, "GetILoadBalancerCertificates")
-		}
-		certs = append(certs, _certs...)
+		lbs[i].region = region
+		ret = append(ret, &lbs[i])
 	}
 
-	return certs, nil
+	return ret, nil
 }
 
 func (region *SRegion) CreateILoadBalancerCertificate(cert *cloudprovider.SLoadbalancerCertificate) (cloudprovider.ICloudLoadbalancerCertificate, error) {
@@ -686,6 +647,30 @@ func (self *SRegion) list(resource string, params url.Values, retVal interface{}
 		}
 	}
 	return jsonutils.Update(retVal, ret)
+}
+
+func (self *SRegion) list_resources(resource string, apiVersion string, params url.Values) (jsonutils.JSONObject, error) {
+	if gotypes.IsNil(params) {
+		params = url.Values{}
+	}
+	params.Add("$filter", fmt.Sprintf("location eq '%s'", self.Name))
+	params.Add("$filter", fmt.Sprintf("resourceType eq '%s'", resource))
+	return self.client.list_v2("resources", apiVersion, params)
+}
+
+func (self *SRegion) list_v2(resource string, apiVersion string, params url.Values) (jsonutils.JSONObject, error) {
+	if gotypes.IsNil(params) {
+		params = url.Values{}
+	}
+	return self.client.list_v2(resource, apiVersion, params)
+}
+
+func (self *SRegion) post_v2(resource string, apiVersion string, body map[string]interface{}) (jsonutils.JSONObject, error) {
+	return self.client.post_v2(resource, apiVersion, body)
+}
+
+func (self *SRegion) show(resource string, apiVersion string) (jsonutils.JSONObject, error) {
+	return self.client.list_v2(resource, apiVersion, nil)
 }
 
 func (region *SRegion) GetIVMs() ([]cloudprovider.ICloudVM, error) {

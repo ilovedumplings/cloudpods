@@ -118,11 +118,8 @@ func (d *SRBDDisk) OnRebuildRoot(ctx context.Context, params api.DiskAllocateInp
 	return storage.renameImage(pool, d.Id, params.BackingDiskId)
 }
 
-func (d *SRBDDisk) Resize(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
-	diskInfo, ok := params.(*jsonutils.JSONDict)
-	if !ok {
-		return nil, hostutils.ParamsError
-	}
+func (d *SRBDDisk) Resize(ctx context.Context, params *SDiskResizeInput) (jsonutils.JSONObject, error) {
+	diskInfo := params.DiskInfo
 	storage := d.Storage.(*SRbdStorage)
 	sizeMb, _ := diskInfo.Int("size")
 	if err := storage.resizeImage(d.Id, uint64(sizeMb)); err != nil {
@@ -130,9 +127,10 @@ func (d *SRBDDisk) Resize(ctx context.Context, params interface{}) (jsonutils.JS
 	}
 
 	resizeFsInfo := &deployapi.DiskInfo{
-		Path: d.GetPath(),
+		Path:   d.GetPath(),
+		DiskId: d.GetId(),
 	}
-	if err := d.ResizeFs(resizeFsInfo); err != nil {
+	if err := d.ResizeFs(resizeFsInfo, params.GuestDesc); err != nil {
 		log.Errorf("Resize fs %s fail %s", d.GetPath(), err)
 		// return nil, errors.Wrapf(err, "resize fs %s", d.GetPath())
 	}
@@ -176,8 +174,10 @@ func (d *SRBDDisk) CreateFromTemplate(ctx context.Context, imageId string, forma
 	retSize, _ := ret.Int("disk_size")
 	log.Infof("REQSIZE: %d, RETSIZE: %d", size, retSize)
 	if size > retSize {
-		params := jsonutils.NewDict()
-		params.Set("size", jsonutils.NewInt(size))
+		params := new(SDiskResizeInput)
+		diskInfo := jsonutils.NewDict()
+		diskInfo.Set("size", jsonutils.NewInt(size))
+		params.DiskInfo = diskInfo
 		return d.Resize(ctx, params)
 	}
 
@@ -210,11 +210,11 @@ func (d *SRBDDisk) createFromTemplate(ctx context.Context, imageId, format strin
 	return d.GetDiskDesc(), nil
 }
 
-func (d *SRBDDisk) CreateFromImageFuse(ctx context.Context, url string, size int64, encryptInfo *apis.SEncryptInfo) error {
+func (d *SRBDDisk) CreateFromRemoteHostImage(ctx context.Context, url string, size int64, encryptInfo *apis.SEncryptInfo) error {
 	return fmt.Errorf("Not support")
 }
 
-func (d *SRBDDisk) CreateRaw(ctx context.Context, sizeMb int, diskFromat string, fsFormat string, encryptInfo *apis.SEncryptInfo, diskId string, back string) (jsonutils.JSONObject, error) {
+func (d *SRBDDisk) CreateRaw(ctx context.Context, sizeMb int, diskFormat string, fsFormat string, fsFeatures *api.DiskFsFeatures, encryptInfo *apis.SEncryptInfo, diskId string, back string) (jsonutils.JSONObject, error) {
 	if encryptInfo != nil {
 		return nil, errors.Wrap(httperrors.ErrNotSupported, "rbd not support encryptInfo")
 	}
@@ -227,15 +227,15 @@ func (d *SRBDDisk) CreateRaw(ctx context.Context, sizeMb int, diskFromat string,
 	diskInfo := &deployapi.DiskInfo{
 		Path: d.GetPath(),
 	}
-	if utils.IsInStringArray(fsFormat, []string{"swap", "ext2", "ext3", "ext4", "xfs"}) {
-		d.FormatFs(fsFormat, diskId, diskInfo)
+	if utils.IsInStringArray(fsFormat, api.SUPPORTED_FS) {
+		d.FormatFs(fsFormat, nil, diskId, diskInfo)
 	}
 
 	return d.GetDiskDesc(), nil
 }
 
-func (d *SRBDDisk) PostCreateFromImageFuse() {
-	log.Errorf("Not support PostCreateFromImageFuse")
+func (d *SRBDDisk) PostCreateFromRemoteHostImage(string) {
+	log.Errorf("Not support PostCreateFromRemoteHostImage")
 }
 
 func (d *SRBDDisk) DiskBackup(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
@@ -256,11 +256,11 @@ func (d *SRBDDisk) CreateSnapshot(snapshotId string, encryptKey string, encForma
 	return storage.createSnapshot(d.Id, snapshotId)
 }
 
-func (d *SRBDDisk) ConvertSnapshot(convertSnapshotId string) error {
-	return nil
+func (d *SRBDDisk) ConvertSnapshotRelyOnReloadDisk(convertSnapshotId string, encryptInfo apis.SEncryptInfo) (func() error, error) {
+	return nil, nil
 }
 
-func (d *SRBDDisk) DeleteSnapshot(snapshotId, convertSnapshot string) error {
+func (d *SRBDDisk) DeleteSnapshot(snapshotId, convertSnapshot string, blockStream bool, encryptInfo apis.SEncryptInfo) error {
 	storage := d.Storage.(*SRbdStorage)
 	return storage.deleteSnapshot(d.Id, snapshotId)
 }
@@ -278,7 +278,7 @@ func (d *SRBDDisk) DiskDeleteSnapshot(ctx context.Context, params interface{}) (
 	if !ok {
 		return nil, hostutils.ParamsError
 	}
-	err := d.DeleteSnapshot(snapshotId, "")
+	err := d.DeleteSnapshot(snapshotId, "", false, apis.SEncryptInfo{})
 	if err != nil {
 		return nil, err
 	} else {

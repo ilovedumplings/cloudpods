@@ -97,7 +97,6 @@ func (e *InfluxdbExecutor) Query(ctx context.Context, dsInfo *tsdb.DataSource, t
 		return nil, errors.Wrap(err, "GetRawQuery")
 	}
 
-	log.Debugf("sql: %s", rawQuery)
 	db := dsInfo.Database
 	if db == "" {
 		db = tsdbQuery.Queries[0].Database
@@ -245,4 +244,40 @@ func (e *InfluxdbExecutor) FilterMeasurement(
 	}
 
 	return retMs, nil
+}
+
+func FillSelectWithMean(query *monitor.AlertQuery) *monitor.AlertQuery {
+	for i, sel := range query.Model.Selects {
+		if len(sel) > 1 {
+			continue
+		}
+		sel = append(sel, monitor.MetricQueryPart{
+			Type:   "mean",
+			Params: []string{},
+		})
+		query.Model.Selects[i] = sel
+	}
+	return query
+}
+
+func (e *InfluxdbExecutor) FillSelect(query *monitor.AlertQuery, isAlert bool) *monitor.AlertQuery {
+	return FillSelectWithMean(query)
+}
+
+func FillGroupByWithWildChar(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryInput, tagId string) *monitor.AlertQuery {
+	if len(tagId) == 0 || (len(inputQuery.Slimit) != 0 && len(inputQuery.Soffset) != 0) {
+		tagId = "*"
+	}
+	if tagId != "" {
+		query.Model.GroupBy = append(query.Model.GroupBy,
+			monitor.MetricQueryPart{
+				Type:   "field",
+				Params: []string{tagId},
+			})
+	}
+	return query
+}
+
+func (e *InfluxdbExecutor) FillGroupBy(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryInput, tagId string, isAlert bool) *monitor.AlertQuery {
+	return FillGroupByWithWildChar(query, inputQuery, tagId)
 }

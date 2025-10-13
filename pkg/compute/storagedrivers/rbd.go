@@ -87,6 +87,14 @@ func (self *SRbdStorageDriver) ValidateCreateData(ctx context.Context, userCred 
 		}
 	}
 
+	enableMessengerV2 := false
+	if input.EnableMessengerV2 != nil {
+		enableMessengerV2 = *input.EnableMessengerV2
+	}
+	autoCacheImages := false
+	if input.AutoCacheImages != nil {
+		autoCacheImages = *input.AutoCacheImages
+	}
 	input.StorageConf.Update(
 		jsonutils.Marshal(map[string]interface{}{
 			"mon_host":             input.MonHost,
@@ -95,6 +103,8 @@ func (self *SRbdStorageDriver) ValidateCreateData(ctx context.Context, userCred 
 			"rados_mon_op_timeout": input.RadosMonOpTimeout,
 			"rados_osd_op_timeout": input.RadosOsdOpTimeout,
 			"client_mount_timeout": input.ClientMountTimeout,
+			"enable_messenger_v2":  enableMessengerV2,
+			"auto_cache_images":    autoCacheImages,
 		}))
 	return nil
 }
@@ -108,6 +118,16 @@ func (self *SRbdStorageDriver) ValidateUpdateData(ctx context.Context, userCred 
 			input.StorageConf.Set(k, jsonutils.NewInt(int64(v)))
 			input.UpdateStorageConf = true
 		}
+	}
+
+	if input.EnableMessengerV2 != nil {
+		input.StorageConf.Set("enable_messenger_v2", jsonutils.NewBool(*input.EnableMessengerV2))
+		input.UpdateStorageConf = true
+	}
+
+	if input.AutoCacheImages != nil {
+		input.StorageConf.Set("auto_cache_images", jsonutils.NewBool(*input.AutoCacheImages))
+		input.UpdateStorageConf = true
 	}
 
 	if len(input.RbdKey) > 0 {

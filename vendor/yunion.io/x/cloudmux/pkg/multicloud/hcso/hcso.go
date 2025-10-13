@@ -264,7 +264,7 @@ func requestWithRetry(client *akClient, ctx context.Context, method httputils.TH
 func (self *SHuaweiClient) resetEndpoint(endpoint, serviceName string) string {
 	if len(endpoint) == 0 {
 		domain := self.HuaweiClientConfig.endpoints.EndpointDomain
-		regionId := self.HuaweiClientConfig.cpcfg.DefaultRegion
+		regionId := self.HuaweiClientConfig.cpcfg.RegionId
 		if len(regionId) == 0 {
 			regionId = self.GetRegions()[0].ID
 		}
@@ -413,7 +413,7 @@ func (self *SHuaweiClient) patchRequest(method httputils.THttpMethod, url string
 	_, respValue, err := httputils.ParseJSONResponse(bodystr, resp, err, self.debug)
 	if err != nil {
 		if e, ok := err.(*httputils.JSONClientError); ok && e.Code == 404 {
-			return nil, errors.Wrapf(cloudprovider.ErrNotFound, err.Error())
+			return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", err.Error())
 		}
 		return nil, err
 	}

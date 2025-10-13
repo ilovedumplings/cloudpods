@@ -38,6 +38,10 @@ func (self *SOracleProviderFactory) GetName() string {
 	return oracle.CLOUD_PROVIDER_ORACLE_CN
 }
 
+func (self *SOracleProviderFactory) IsReadOnly() bool {
+	return true
+}
+
 func (self *SOracleProviderFactory) ValidateCreateCloudaccountData(ctx context.Context, input cloudprovider.SCloudaccountCredential) (cloudprovider.SCloudaccount, error) {
 	output := cloudprovider.SCloudaccount{}
 	if len(input.OracleTenancyOCID) == 0 {
@@ -111,12 +115,16 @@ func (self *SOracleProviderFactory) GetProvider(cfg cloudprovider.ProviderConfig
 
 func (self *SOracleProviderFactory) GetClientRC(info cloudprovider.SProviderInfo) (map[string]string, error) {
 	userOCID, compartment := parseCompartment(info.Account)
+	region := info.Region
+	if len(region) == 0 {
+		region = oracle.ORACLE_DEFAULT_REGION
+	}
 	return map[string]string{
 		"ORACLE_TENANCY_OCID":   info.Url,
 		"ORACLE_USER_OCID":      userOCID,
 		"ORACLE_COMPARTMENT_ID": compartment,
 		"ORACLE_PRIVATE_KEY":    info.Secret,
-		"ORACLE_REGION_ID":      oracle.ORACLE_DEFAULT_REGION,
+		"ORACLE_REGION_ID":      region,
 	}, nil
 }
 
@@ -218,5 +226,5 @@ func (self *SOracleProvider) GetCloudRegionExternalIdPrefix() string {
 }
 
 func (self *SOracleProvider) GetMetrics(opts *cloudprovider.MetricListOptions) ([]cloudprovider.MetricValues, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	return self.client.GetMetrics(opts)
 }

@@ -16,7 +16,6 @@ package models
 
 import (
 	"context"
-	"time"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
@@ -101,6 +100,7 @@ type ISecurityGroupDriver interface {
 	RequestCreateSecurityGroup(ctx context.Context, userCred mcclient.TokenCredential, secgroup *SSecurityGroup, rules api.SSecgroupRuleResourceSet) error
 	// 根据安全组归属vpc还是region进行过滤
 	GetSecurityGroupFilter(vpc *SVpc) (func(q *sqlchemy.SQuery) *sqlchemy.SQuery, error)
+	GetDefaultSecurityGroupNamePrefix() string
 	CreateDefaultSecurityGroup(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, vpc *SVpc) (*SSecurityGroup, error)
 	RequestPrepareSecurityGroups(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, secgroups []SSecurityGroup, vpc *SVpc, callback func(ids []string) error, task taskman.ITask) error
 	RequestDeleteSecurityGroup(ctx context.Context, userCred mcclient.TokenCredential, secgroup *SSecurityGroup, task taskman.ITask) error
@@ -236,7 +236,7 @@ type IElasticcacheDriver interface {
 	RequestCreateElasticcacheAccount(ctx context.Context, userCred mcclient.TokenCredential, elasticcacheAccount *SElasticcacheAccount, task taskman.ITask) error
 	RequestCreateElasticcacheAcl(ctx context.Context, userCred mcclient.TokenCredential, elasticcacheAcl *SElasticcacheAcl, task taskman.ITask) error
 	RequestCreateElasticcacheBackup(ctx context.Context, userCred mcclient.TokenCredential, elasticcacheBackup *SElasticcacheBackup, task taskman.ITask) error
-	RequestRenewElasticcache(ctx context.Context, userCred mcclient.TokenCredential, elasticcache *SElasticcache, bc billing.SBillingCycle) (time.Time, error)
+	RequestRenewElasticcache(ctx context.Context, userCred mcclient.TokenCredential, elasticcache *SElasticcache, bc billing.SBillingCycle) error
 	RequestElasticcacheSetAutoRenew(ctx context.Context, userCred mcclient.TokenCredential, elasticcache *SElasticcache, autoRenew bool, task taskman.ITask) error
 	RequestRestartElasticcache(ctx context.Context, userCred mcclient.TokenCredential, elasticcache *SElasticcache, task taskman.ITask) error
 	RequestSyncElasticcache(ctx context.Context, userCred mcclient.TokenCredential, elasticcache *SElasticcache, task taskman.ITask) error

@@ -38,14 +38,43 @@ const (
 )
 
 type CloudDeviceInfo struct {
-	Id             string `json:"id"`
-	GuestId        string `json:"guest_id"`
-	HostId         string `json:"host_id"`
-	DevType        string `json:"dev_type"`
-	VendorDeviceId string `json:"vendor_device_id"`
-	Addr           string `json:"addr"`
-	DetectedOnHost bool   `json:"detected_on_host"`
-	MdevId         string `json:"mdev_id"`
+	Id                  string                      `json:"id"`
+	GuestId             string                      `json:"guest_id"`
+	HostId              string                      `json:"host_id"`
+	DevType             string                      `json:"dev_type"`
+	VendorDeviceId      string                      `json:"vendor_device_id"`
+	Addr                string                      `json:"addr"`
+	DetectedOnHost      bool                        `json:"detected_on_host"`
+	MdevId              string                      `json:"mdev_id"`
+	Model               string                      `json:"model"`
+	WireId              string                      `json:"wire_id"`
+	OvsOffloadInterface string                      `json:"ovs_offload_interface"`
+	IsInfinibandNic     bool                        `json:"is_infiniband_nic"`
+	NvmeSizeMB          int                         `json:"nvme_size_mb"`
+	DevicePath          string                      `json:"device_path"`
+	CardPath            string                      `json:"card_path"`
+	RenderPath          string                      `json:"render_path"`
+	Index               int                         `json:"index"`
+	DeviceMinor         int                         `json:"device_minor"`
+	MpsMemoryLimit      int                         `json:"mps_memory_limit"`
+	MpsMemoryTotal      int                         `json:"mps_memory_total"`
+	MpsThreadPercentage int                         `json:"mps_thread_percentage"`
+	NumaNode            int                         `json:"numa_node"`
+	PcieInfo            *api.IsolatedDevicePCIEInfo `json:"pcie_info"`
+
+	// The frame rate limiter (FRL) configuration in frames per second
+	FRL string `json:"frl"`
+	// The frame buffer size in Mbytes
+	Framebuffer string `json:"framebuffer"`
+	// The maximum resolution per display head, eg: 5120x2880
+	MaxResolution string `json:"max_resolution"`
+	// The maximum number of virtual display heads that the vGPU type supports
+	// In computer graphics and display technology, the term "head" is commonly used to
+	// describe the physical interface of a display device or display output.
+	// It refers to a connection point on the monitor, such as HDMI, DisplayPort, or VGA interface.
+	NumHeads string `json:"num_heads"`
+	// The maximum number of vGPU instances per physical GPU
+	MaxInstance string `json:"max_instance"`
 }
 
 type IHost interface {
@@ -111,17 +140,27 @@ type IDevice interface {
 	// Get extra PCIE information
 	GetPCIEInfo() *api.IsolatedDevicePCIEInfo
 	GetDevicePath() string
+	GetCardPath() string
+	GetRenderPath() string
+	GetIndex() int
+	GetDeviceMinor() int
+
+	// mps infos
+	GetNvidiaMpsMemoryLimit() int
+	GetNvidiaMpsMemoryTotal() int
+	GetNvidiaMpsThreadPercentage() int
 }
 
 type IsolatedDeviceManager interface {
 	GetDevices() []IDevice
 	GetDeviceByIdent(vendorDevId, addr, mdevId string) IDevice
 	GetDeviceByAddr(addr string) IDevice
-	ProbePCIDevices(skipGPUs, skipUSBs, skipCustomDevs bool, sriovNics, ovsOffloadNics []HostNic, nvmePciDisks, amdVgpuPFs, nvidiaVgpuPFs []string, enableWhitelist bool)
+	ProbePCIDevices(skipGPUs, skipUSBs, skipCustomDevs bool, sriovNics, ovsOffloadNics []HostNic, nvmePciDisks, amdVgpuPFs, nvidiaVgpuPFs []string, enableCudaMps, enableContainerNPU, enableWhitelist bool)
 	StartDetachTask()
 	BatchCustomProbe()
 	AppendDetachedDevice(dev *CloudDeviceInfo)
 	GetQemuParams(devAddrs []string) *QemuParams
+	CheckDevIsNeedUpdate(dev IDevice, devInfo *CloudDeviceInfo) bool
 }
 
 type isolatedDeviceManager struct {
@@ -188,10 +227,15 @@ func (man *isolatedDeviceManager) probeContainerDevices() {
 	}
 }
 
-func (man *isolatedDeviceManager) probeContainerNvidiaGPUs() {
-	devman, err := GetContainerDeviceManager(ContainerDeviceTypeNVIDIAGPU)
+func (man *isolatedDeviceManager) probeContainerNvidiaGPUs(enableCudaMps bool) {
+	devType := ContainerDeviceTypeNvidiaGpu
+	if enableCudaMps {
+		devType = ContainerDeviceTypeNvidiaMps
+	}
+
+	devman, err := GetContainerDeviceManager(devType)
 	if err != nil {
-		log.Errorf("no container device manager %s found", ContainerDeviceTypeNVIDIAGPU)
+		log.Errorf("no container device manager %s found", devType)
 		return
 	}
 	devs, err := devman.ProbeDevices()
@@ -202,6 +246,28 @@ func (man *isolatedDeviceManager) probeContainerNvidiaGPUs() {
 		for idx, dev := range devs {
 			man.devices = append(man.devices, dev)
 			log.Infof("Add Container nvidia GPU device: %d => %#v", idx, dev)
+		}
+	}
+}
+
+func (man *isolatedDeviceManager) probeContainerAscendNPUs(enable bool) {
+	if !enable {
+		return
+	}
+
+	devman, err := GetContainerDeviceManager(ContainerDeviceTypeAscendNpu)
+	if err != nil {
+		log.Errorf("no container device manager %s found", ContainerDeviceTypeAscendNpu)
+		return
+	}
+	devs, err := devman.ProbeDevices()
+	if err != nil {
+		log.Warningf("Probe container Ascend npu devices: %v", err)
+		return
+	} else {
+		for idx, dev := range devs {
+			man.devices = append(man.devices, dev)
+			log.Infof("Add Container Ascend npu device: %d => %#v", idx, dev)
 		}
 	}
 }
@@ -369,11 +435,12 @@ func (man *isolatedDeviceManager) probeNVIDIAVgpus(nvidiaVgpuPFs []string) {
 	}
 }
 
-func (man *isolatedDeviceManager) ProbePCIDevices(skipGPUs, skipUSBs, skipCustomDevs bool, sriovNics, ovsOffloadNics []HostNic, nvmePciDisks, amdVgpuPFs, nvidiaVgpuPFs []string, enableWhitelist bool) {
+func (man *isolatedDeviceManager) ProbePCIDevices(skipGPUs, skipUSBs, skipCustomDevs bool, sriovNics, ovsOffloadNics []HostNic, nvmePciDisks, amdVgpuPFs, nvidiaVgpuPFs []string, enableCudaMps, enableContainerNPU, enableWhitelist bool) {
 	man.devices = make([]IDevice, 0)
 	if man.host.IsContainerHost() {
-		man.probeContainerNvidiaGPUs()
 		man.probeContainerDevices()
+		man.probeContainerNvidiaGPUs(enableCudaMps)
+		man.probeContainerAscendNPUs(enableContainerNPU)
 	} else {
 		devModels, err := man.getCustomIsolatedDeviceModels()
 		if err != nil {
@@ -419,6 +486,78 @@ func (man *isolatedDeviceManager) getCustomIsolatedDeviceModels() ([]IsolatedDev
 
 func (man *isolatedDeviceManager) getSession() *mcclient.ClientSession {
 	return man.host.GetSession()
+}
+
+func (man *isolatedDeviceManager) CheckDevIsNeedUpdate(dev IDevice, devInfo *CloudDeviceInfo) bool {
+	if dev.GetDeviceType() != devInfo.DevType {
+		return true
+	}
+	if dev.GetDevicePath() != devInfo.DevicePath {
+		return true
+	}
+	if dev.GetCardPath() != devInfo.CardPath {
+		return true
+	}
+	if dev.GetRenderPath() != devInfo.RenderPath {
+		return true
+	}
+	if dev.GetIndex() != devInfo.Index {
+		return true
+	}
+	if dev.GetDeviceMinor() != devInfo.DeviceMinor {
+		return true
+	}
+	if dev.GetModelName() != devInfo.Model {
+		return true
+	}
+	if dev.GetWireId() != devInfo.WireId {
+		return true
+	}
+	if dev.IsInfinibandNic() != devInfo.IsInfinibandNic {
+		return true
+	}
+	if dev.GetOvsOffloadInterfaceName() != devInfo.OvsOffloadInterface {
+		return true
+	}
+	if dev.GetNVMESizeMB() > 0 && devInfo.NvmeSizeMB > 0 && dev.GetNVMESizeMB() != devInfo.NvmeSizeMB {
+		return true
+	}
+	if numaNode, _ := dev.GetNumaNode(); numaNode != devInfo.NumaNode {
+		return true
+	}
+	if dev.GetMdevId() != devInfo.MdevId {
+		return true
+	}
+	if info := dev.GetPCIEInfo(); info != nil && devInfo.PcieInfo == nil {
+		return true
+	}
+	if dev.GetNvidiaMpsMemoryLimit() != devInfo.MpsMemoryLimit {
+		return true
+	}
+	if dev.GetNvidiaMpsMemoryTotal() != devInfo.MpsMemoryTotal {
+		return true
+	}
+	if dev.GetNvidiaMpsThreadPercentage() != devInfo.MpsThreadPercentage {
+		return true
+	}
+	if profile := dev.GetNVIDIAVgpuProfile(); profile != nil {
+		if val, _ := profile["frl"]; val != devInfo.FRL {
+			return true
+		}
+		if val, _ := profile["framebuffer"]; val != devInfo.Framebuffer {
+			return true
+		}
+		if val, _ := profile["max_resolution"]; val != devInfo.MaxResolution {
+			return true
+		}
+		if val, _ := profile["num_heads"]; val != devInfo.NumHeads {
+			return true
+		}
+		if val, _ := profile["max_instance"]; val != devInfo.MaxInstance {
+			return true
+		}
+	}
+	return false
 }
 
 func (man *isolatedDeviceManager) GetDeviceByIdent(vendorDevId, addr, mdevId string) IDevice {
@@ -473,9 +612,13 @@ func (man *isolatedDeviceManager) StartDetachTask() {
 				log.Infof("Start delete cloud device %s", jsonutils.Marshal(dev))
 				if _, err := modules.IsolatedDevices.PerformAction(man.getSession(), dev.Id, "purge",
 					jsonutils.Marshal(map[string]interface{}{
-						"purge": true,
+						//"purge": true,
 					})); err != nil {
 					if errors.Cause(err) == httperrors.ErrResourceNotFound {
+						break
+					}
+					if strings.Contains(err.Error(), api.ErrMsgIsolatedDeviceUsedByServer) {
+						log.Warningf("Purge isolated device %s failed: %v", jsonutils.Marshal(dev), err)
 						break
 					}
 					log.Errorf("Detach device %s failed: %v, try again later", dev.Id, err)
@@ -495,6 +638,7 @@ func (man *isolatedDeviceManager) GetQemuParams(devAddrs []string) *QemuParams {
 
 type SBaseDevice struct {
 	dev            *PCIDevice
+	originAddr     string
 	cloudId        string
 	hostId         string
 	guestId        string
@@ -544,12 +688,17 @@ func (dev *SBaseDevice) SetDeviceInfo(info CloudDeviceInfo) {
 	}
 }
 
-func SyncDeviceInfo(session *mcclient.ClientSession, hostId string, dev IDevice) (jsonutils.JSONObject, error) {
+func SyncDeviceInfo(session *mcclient.ClientSession, hostId string, dev IDevice, needUpdate bool) (jsonutils.JSONObject, error) {
 	if len(dev.GetHostId()) == 0 {
 		dev.SetHostId(hostId)
 	}
 	data := GetApiResourceData(dev)
 	if len(dev.GetCloudId()) != 0 {
+		if !needUpdate {
+			log.Infof("Update %s isolated_device: do nothing", dev.GetCloudId())
+			return nil, nil
+		}
+
 		log.Infof("Update %s isolated_device: %s", dev.GetCloudId(), data.String())
 		return modules.IsolatedDevices.Update(session, dev.GetCloudId(), data)
 	}
@@ -567,6 +716,18 @@ func (dev *SBaseDevice) GetVendorDeviceId() string {
 
 func (dev *SBaseDevice) GetAddr() string {
 	return dev.dev.Addr
+}
+
+func (dev *SBaseDevice) GetOriginAddr() string {
+	if dev.originAddr != "" {
+		return dev.originAddr
+	}
+	return dev.dev.Addr
+}
+
+func (dev *SBaseDevice) SetAddr(addr, originAddr string) {
+	dev.originAddr = originAddr
+	dev.dev.Addr = addr
 }
 
 func (dev *SBaseDevice) GetDeviceType() string {
@@ -628,6 +789,34 @@ func (dev *SBaseDevice) GetGuestId() string {
 	return dev.guestId
 }
 
+func (dev *SBaseDevice) GetNvidiaMpsMemoryLimit() int {
+	return -1
+}
+
+func (dev *SBaseDevice) GetNvidiaMpsMemoryTotal() int {
+	return -1
+}
+
+func (dev *SBaseDevice) GetNvidiaMpsThreadPercentage() int {
+	return -1
+}
+
+func (dev *SBaseDevice) GetCardPath() string {
+	return ""
+}
+
+func (dev *SBaseDevice) GetRenderPath() string {
+	return ""
+}
+
+func (dev *SBaseDevice) GetIndex() int {
+	return -1
+}
+
+func (dev *SBaseDevice) GetDeviceMinor() int {
+	return -1
+}
+
 func GetApiResourceData(dev IDevice) *jsonutils.JSONDict {
 	data := map[string]interface{}{
 		"dev_type":         dev.GetDeviceType(),
@@ -664,7 +853,7 @@ func GetApiResourceData(dev IDevice) *jsonutils.JSONDict {
 	if numaNode, err := dev.GetNumaNode(); err == nil {
 		data["numa_node"] = numaNode
 	} else {
-		log.Warningf("failed get dev %s numa node %s", dev.GetAddr(), err)
+		log.Debugf("failed get dev %s numa node %s", dev.GetAddr(), err)
 	}
 
 	if dev.GetMdevId() != "" {
@@ -681,6 +870,30 @@ func GetApiResourceData(dev IDevice) *jsonutils.JSONDict {
 	devPath := dev.GetDevicePath()
 	if devPath != "" {
 		data["device_path"] = devPath
+	}
+	cardPath := dev.GetCardPath()
+	if cardPath != "" {
+		data["card_path"] = cardPath
+	}
+	renderPath := dev.GetRenderPath()
+	if renderPath != "" {
+		data["render_path"] = renderPath
+	}
+	if index := dev.GetIndex(); index != -1 {
+		data["index"] = index
+	}
+	if deviceMinor := dev.GetDeviceMinor(); deviceMinor != -1 {
+		data["device_minor"] = deviceMinor
+	}
+
+	if mpsMemTotal := dev.GetNvidiaMpsMemoryTotal(); mpsMemTotal > 0 {
+		data["mps_memory_total"] = mpsMemTotal
+	}
+	if mpsMemLimit := dev.GetNvidiaMpsMemoryLimit(); mpsMemLimit > 0 {
+		data["mps_memory_limit"] = mpsMemLimit
+	}
+	if mpsThreadPercentage := dev.GetNvidiaMpsThreadPercentage(); mpsThreadPercentage > 0 {
+		data["mps_thread_percentage"] = mpsThreadPercentage
 	}
 	return jsonutils.Marshal(data).(*jsonutils.JSONDict)
 }

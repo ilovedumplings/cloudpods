@@ -226,7 +226,7 @@ func UnmarshalError(r *request.Request) {
 	}
 
 	if strings.Contains(respErr.Errors.Code, "NotFound") || strings.HasPrefix(respErr.Errors.Code, "NoSuch") {
-		r.Error = errors.Wrapf(cloudprovider.ErrNotFound, jsonutils.Marshal(respErr).String())
+		r.Error = errors.Wrapf(cloudprovider.ErrNotFound, "%s", jsonutils.Marshal(respErr).String())
 		return
 	}
 
@@ -303,6 +303,8 @@ func jsonRequest(cli *client.Client, apiName string, params map[string]string, r
 			"ListHostedZones":            "hostedzone",
 			"ListGeoLocations":           "geolocations",
 			"CreateHostedZone":           "hostedzone",
+			"GetTrafficPolicyInstance":   "trafficpolicyinstance",
+			"GetTrafficPolicy":           "trafficpolicy",
 			"GetHostedZone":              "",
 			"DeleteHostedZone":           "",
 			"AssociateVPCWithHostedZone": "",

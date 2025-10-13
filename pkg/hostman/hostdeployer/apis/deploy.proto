@@ -131,6 +131,7 @@ message DiskInfo {
   string encrypt_password = 2;
   string encrypt_format = 3;
   string encrypt_alg = 4;
+  string disk_id = 5;
 }
 
 message DeployParams {
@@ -144,12 +145,29 @@ message ResizeFsParams {
   DiskInfo disk_info = 1;
   string hypervisor = 2;
   VDDKConInfo vddk_info = 3;
+  GuestDesc guest_desc = 4;
+}
+
+message FsExt4Features {
+  bool CaseInsensitive = 1;
+  int32 ReservedBlocksPercentage = 2;
+}
+
+message FsF2fsFeatures {
+  bool CaseInsensitive = 1;
+  int32 OverprovisionRatioPercentage = 2;
+}
+
+message FsFeatures {
+  FsExt4Features ext4 = 1;
+  FsF2fsFeatures f2fs = 2;
 }
 
 message FormatFsParams {
   DiskInfo disk_info = 1;
   string fs_format = 2;
   string uuid = 3;
+  FsFeatures fs_features = 4;
 }
 
 message ReleaseInfo {
@@ -181,6 +199,7 @@ message ImageInfo {
   bool is_readonly = 5;
   string physical_partition_type = 6;
   bool is_installed_cloud_init = 7;
+  bool is_bios_support = 8;
 }
 
 message EsxiDiskInfo {
@@ -196,6 +215,19 @@ message EsxiDisksConnectionInfo {
   repeated EsxiDiskInfo disks = 1;
 }
 
+
+// cdrom, scsi cdrom, hard drive, scsi, pci
+message BootDevices {
+  int32 BootOrder = 1;
+  int32 DevType = 2;
+  int32 AttachOrder = 3;
+}
+
+message OvmfBootOrderParams {
+  string OvmfVarsPath = 1;
+  repeated BootDevices devs = 2;
+}
+
 service DeployAgent {
   rpc DeployGuestFs (DeployParams) returns (DeployGuestFsResponse);
   rpc ResizeFs (ResizeFsParams) returns (Empty);
@@ -204,4 +236,5 @@ service DeployAgent {
   rpc ProbeImageInfo(ProbeImageInfoPramas) returns (ImageInfo);
   rpc ConnectEsxiDisks(ConnectEsxiDisksParams) returns (EsxiDisksConnectionInfo);
   rpc DisconnectEsxiDisks(EsxiDisksConnectionInfo) returns (Empty);
+  rpc SetOvmfBootOrder(OvmfBootOrderParams) returns (Empty);
 }

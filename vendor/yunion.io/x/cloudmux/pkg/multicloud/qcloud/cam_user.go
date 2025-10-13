@@ -83,12 +83,29 @@ func (user *SUser) IsConsoleLogin() bool {
 	return user.ConsoleLogin == 1
 }
 
+func (user *SUser) SetDisable() error {
+	login := false
+	return user.client.UpdateUser(user.Name, "", &login, nil)
+}
+
+func (user *SUser) SetEnable(opts *cloudprovider.SClouduserEnableOptions) error {
+	login := true
+	err := user.client.UpdateUser(user.Name, opts.Password, &login, &opts.PasswordResetRequired)
+	if err != nil {
+		return errors.Wrapf(err, "UpdateUser")
+	}
+	if opts.EnableMfa {
+		return user.client.EnableUserMfa(fmt.Sprintf("%d", user.Uin))
+	}
+	return nil
+}
+
 func (user *SUser) Delete() error {
 	return user.client.DeleteUser(user.Name)
 }
 
 func (user *SUser) ResetPassword(password string) error {
-	return user.client.UpdateUser(user.Name, password)
+	return user.client.UpdateUser(user.Name, password, nil, nil)
 }
 
 func (user *SUser) GetICloudgroups() ([]cloudprovider.ICloudgroup, error) {
@@ -243,11 +260,33 @@ func (self *SQcloudClient) AddUser(name, password, desc string, consoleLogin boo
 	return user, nil
 }
 
-func (self *SQcloudClient) UpdateUser(name, password string) error {
+func (self *SQcloudClient) EnableUserMfa(uin string) error {
 	params := map[string]string{
-		"Name":         name,
-		"ConsoleLogin": "1",
-		"Password":     password,
+		"OpUin":            uin,
+		"LoginFlag.Stoken": "1",
+	}
+	_, err := self.camRequest("SetMfaFlag", params)
+	return err
+}
+
+func (self *SQcloudClient) UpdateUser(name, password string, login, reset *bool) error {
+	params := map[string]string{
+		"Name": name,
+	}
+	if len(password) > 0 {
+		params["Password"] = password
+	}
+	if login != nil {
+		params["ConsoleLogin"] = "0"
+		if *login {
+			params["ConsoleLogin"] = "1"
+		}
+	}
+	if reset != nil {
+		params["NeedResetPassword"] = "0"
+		if *reset {
+			params["NeedResetPassword"] = "1"
+		}
 	}
 	_, err := self.camRequest("UpdateUser", params)
 	if err != nil {

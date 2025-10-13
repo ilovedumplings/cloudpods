@@ -35,6 +35,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=cloud_kube_node
+// +onecloud:swagger-gen-model-plural=cloud_kube_nodes
 type SKubeNodeManager struct {
 	db.SStatusStandaloneResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -320,9 +322,9 @@ func (self *SKubeCluster) GetNodePoolIdByExternalId(id string) (*SKubeNodePool, 
 		return &pools[0], nil
 	}
 	if len(pools) == 0 {
-		return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+		return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%v", id)
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrDuplicateId, id)
+	return nil, errors.Wrapf(cloudprovider.ErrDuplicateId, "%v", id)
 }
 
 func (self *SKubeCluster) newFromCloudKubeNode(ctx context.Context, userCred mcclient.TokenCredential, ext cloudprovider.ICloudKubeNode) (*SKubeNode, error) {

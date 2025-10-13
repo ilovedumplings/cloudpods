@@ -26,7 +26,7 @@ type ScalingGroupCreateInput struct {
 	// example: cr-test-one
 	Cloudregion string `json:"cloudregion"`
 
-	//swagger: ignore
+	//swagger:ignore
 	CloudregionId string `json:"cloudregion_id"`
 
 	// description: hypervisor
@@ -53,22 +53,22 @@ type ScalingGroupCreateInput struct {
 	// example: gt-test-one
 	GuestTemplate string `json:"guest_template"`
 
-	// swagger: ignore
+	// swagger:ignore
 	GuestTemplateId string `json:"guest_template_id"`
 
 	// description: 扩容策略
-	// enum: balanced
+	// enum: ["balanced"]
 	// required: false
 	// example: balanced
 	ExpansionPrinciple string `json:"expansion_principle"`
 
 	// description: 缩容策略
-	// enum: earliest,latest,config_earliest,config_latest
+	// enum: ["earliest","latest","config_earliest","config_latest"]
 	// example: latest
 	ShrinkPrinciple string `json:"shrink_principle"`
 
 	// description: 检查健康模式
-	// enum: normal,loadbalancer
+	// enum: ["normal","loadbalancer"]
 	// example: normal
 	HealthCheckMode string `json:"health_check_mode"`
 
@@ -84,7 +84,7 @@ type ScalingGroupCreateInput struct {
 	// example: lbg-nihao
 	LbBackendGroup string `json:"lb_backend_group"`
 
-	// swagger: ignore
+	// swagger:ignore
 	BackendGroupId string `json:"backend_group_id"`
 
 	// description: 负载均衡后端服务器统一端口

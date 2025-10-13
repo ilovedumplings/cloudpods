@@ -36,6 +36,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=loadbalanceracl
+// +onecloud:swagger-gen-model-plural=loadbalanceracls
 type SLoadbalancerAclManager struct {
 	SLoadbalancerLogSkipper
 
@@ -387,6 +389,15 @@ func (manager *SLoadbalancerAclManager) QueryDistinctExtraField(q *sqlchemy.SQue
 		return q, nil
 	}
 
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SLoadbalancerAclManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
+	}
 	return q, httperrors.ErrNotFound
 }
 

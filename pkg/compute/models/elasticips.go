@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"time"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
@@ -33,6 +34,7 @@ import (
 	"yunion.io/x/sqlchemy"
 
 	"yunion.io/x/onecloud/pkg/apis"
+	billing_api "yunion.io/x/onecloud/pkg/apis/billing"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
@@ -49,6 +51,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=eip
+// +onecloud:swagger-gen-model-plural=eips
 type SElasticipManager struct {
 	db.SVirtualResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -158,7 +162,11 @@ func (manager *SElasticipManager) ListItemFilter(
 				return nil, httperrors.NewGeneralError(err)
 			}
 			guest := serverObj.(*SGuest)
-			if guest.Hypervisor == api.HYPERVISOR_KVM || (utils.IsInStringArray(guest.Hypervisor, api.PRIVATE_CLOUD_HYPERVISORS) &&
+			region, err := guest.GetRegion()
+			if err != nil {
+				return nil, errors.Wrapf(err, "GetRegion")
+			}
+			if guest.Hypervisor == api.HYPERVISOR_KVM || (utils.IsInStringArray(region.Provider, api.PRIVATE_CLOUD_PROVIDERS) &&
 				guest.Hypervisor != api.HYPERVISOR_HCSO && guest.Hypervisor != api.HYPERVISOR_HCS) {
 				zone, _ := guest.getZone()
 				networks := NetworkManager.Query().SubQuery()
@@ -257,6 +265,14 @@ func (manager *SElasticipManager) ListItemFilter(
 		q = q.Filter(sqlchemy.OR(sqlchemy.IsNull(q.Field("associate_id")), sqlchemy.IsEmpty(q.Field("associate_id"))))
 	}
 
+	if query.IsAssociated != nil {
+		if *query.IsAssociated {
+			q = q.IsNotEmpty("associate_type")
+		} else {
+			q = q.IsNullOrEmpty("associate_type")
+		}
+	}
+
 	if len(query.Mode) > 0 {
 		q = q.In("mode", query.Mode)
 	}
@@ -281,6 +297,27 @@ func (manager *SElasticipManager) ListItemFilter(
 		} else {
 			q = q.IsFalse("auto_dellocate")
 		}
+	}
+	if len(query.AssociateName) > 0 {
+		filters := []sqlchemy.ICondition{}
+		likeQuery := func(sq *sqlchemy.SQuery) *sqlchemy.SQuery {
+			conditions := []sqlchemy.ICondition{}
+			for _, name := range query.AssociateName {
+				conditions = append(conditions, sqlchemy.Contains(sq.Field("name"), name))
+			}
+			return sq.Filter(sqlchemy.OR(conditions...))
+		}
+		for _, m := range []db.IModelManager{
+			GuestManager,
+			GroupManager,
+			LoadbalancerManager,
+			NatGatewayManager,
+		} {
+			sq := m.Query("id")
+			sq = likeQuery(sq)
+			filters = append(filters, sqlchemy.In(q.Field("associate_id"), sq))
+		}
+		q = q.Filter(sqlchemy.OR(filters...))
 	}
 
 	return q, nil
@@ -322,6 +359,15 @@ func (manager *SElasticipManager) QueryDistinctExtraField(q *sqlchemy.SQuery, fi
 		return q, nil
 	}
 	q, err = manager.SCloudregionResourceBaseManager.QueryDistinctExtraField(q, field)
+	if err == nil {
+		return q, nil
+	}
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SElasticipManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
 	if err == nil {
 		return q, nil
 	}
@@ -437,7 +483,26 @@ func (manager *SElasticipManager) SyncEips(
 		}
 	}
 	for i := 0; i < len(added); i += 1 {
-		_, err := manager.newFromCloudEip(ctx, userCred, added[i], provider, region, syncOwnerId)
+		eip := &SElasticip{}
+		eip.SetModelManager(ElasticipManager, eip)
+		err := ElasticipManager.Query().
+			Equals("ip_addr", added[i].GetIpAddr()).
+			Equals("manager_id", provider.Id).
+			Equals("cloudregion_id", region.Id).
+			Equals("mode", api.EIP_MODE_INSTANCE_PUBLICIP).First(eip)
+
+		// 公网IP转弹性IP
+		if err == nil {
+			err = eip.SyncWithCloudEip(ctx, userCred, provider, added[i], syncOwnerId)
+			if err != nil {
+				syncResult.UpdateError(err)
+				continue
+			}
+			syncResult.Update()
+			continue
+		}
+
+		_, err = manager.newFromCloudEip(ctx, userCred, added[i], provider, region, syncOwnerId)
 		if err != nil {
 			syncResult.AddError(err)
 		} else {
@@ -545,12 +610,11 @@ func (self *SElasticip) SyncWithCloudEip(ctx context.Context, userCred mcclient.
 			self.ChargeType = chargeType
 		}
 
-		factory, _ := provider.GetProviderFactory()
-		if factory != nil && factory.IsSupportPrepaidResources() {
-			self.BillingType = ext.GetBillingType()
-			if expired := ext.GetExpiredAt(); !expired.IsZero() {
-				self.ExpiredAt = expired
-			}
+		self.BillingType = ext.GetBillingType()
+		self.ExpiredAt = time.Time{}
+		self.AutoRenew = false
+		if self.BillingType == billing_api.BILLING_TYPE_PREPAID {
+			self.ExpiredAt = ext.GetExpiredAt()
 			self.AutoRenew = ext.IsAutoRenew()
 		}
 
@@ -605,6 +669,13 @@ func (manager *SElasticipManager) newFromCloudEip(ctx context.Context, userCred 
 	eip.AssociateType = extEip.GetAssociationType()
 	if !extEip.GetCreatedAt().IsZero() {
 		eip.CreatedAt = extEip.GetCreatedAt()
+	}
+	eip.BillingType = extEip.GetBillingType()
+	eip.ExpiredAt = time.Time{}
+	eip.AutoRenew = false
+	if eip.BillingType == billing_api.BILLING_TYPE_PREPAID {
+		eip.ExpiredAt = extEip.GetExpiredAt()
+		eip.AutoRenew = extEip.IsAutoRenew()
 	}
 	if len(eip.ChargeType) == 0 {
 		eip.ChargeType = api.EIP_CHARGE_TYPE_BY_TRAFFIC
@@ -847,8 +918,9 @@ func (self *SElasticip) AssociateLoadbalancer(ctx context.Context, userCred mccl
 	if len(self.AssociateType) > 0 && len(self.AssociateId) > 0 {
 		if self.AssociateType == api.EIP_ASSOCIATE_TYPE_LOADBALANCER && self.AssociateId == lb.Id {
 			return nil
-		} else {
-			return fmt.Errorf("EIP has been associated!!")
+		}
+		if self.GetAssociateResource() != nil {
+			return fmt.Errorf("eip has been associated!!")
 		}
 	}
 	_, err := db.Update(self, func() error {
@@ -879,7 +951,9 @@ func (self *SElasticip) AssociateInstance(ctx context.Context, userCred mcclient
 		if self.AssociateType == insType && self.AssociateId == ins.GetId() {
 			return nil
 		}
-		return fmt.Errorf("EIP has been associated!!")
+		if self.GetAssociateResource() != nil {
+			return fmt.Errorf("eip has been associated!!")
+		}
 	}
 	_, err := db.Update(self, func() error {
 		self.AssociateType = insType
@@ -909,7 +983,9 @@ func (self *SElasticip) AssociateInstanceGroup(ctx context.Context, userCred mcc
 		if self.AssociateType == insType && self.AssociateId == ins.GetId() {
 			return nil
 		}
-		return fmt.Errorf("EIP has been associated!!")
+		if self.GetAssociateResource() != nil {
+			return fmt.Errorf("eip has been associated!!")
+		}
 	}
 	_, err := db.Update(self, func() error {
 		self.AssociateType = insType
@@ -1269,8 +1345,8 @@ func (self *SElasticip) PerformAssociate(ctx context.Context, userCred mcclient.
 		if lb.PendingDeleted {
 			return input, httperrors.NewInvalidStatusError("cannot associate with pending deleted loadbalancer")
 		}
-		seip, _ := lb.GetEip()
-		if seip != nil {
+		eips, _ := lb.GetEips()
+		if len(eips) > 0 {
 			return input, httperrors.NewInvalidStatusError("loadbalancer is already associated with eip")
 		}
 	}
@@ -1438,12 +1514,24 @@ func (manager *SElasticipManager) FetchCustomizeColumns(
 		log.Errorf("FetchIdNameMap2 group")
 		return rows
 	}
+	gns := []SGuestnetwork{}
+	err = GuestnetworkManager.Query().In("guest_id", guestIds).All(&gns)
+	if err != nil {
+		log.Errorf("FetchModelObjects GuestnetworkManager")
+		return rows
+	}
+	gnMap := map[string]string{}
+	for i := range gns {
+		gnMap[gns[i].GuestId] = gns[i].IpAddr
+	}
+
 	for i := range rows {
 		eip := objs[i].(*SElasticip)
 		if len(eip.AssociateId) > 0 {
 			switch eip.AssociateType {
 			case api.EIP_ASSOCIATE_TYPE_SERVER:
 				rows[i].AssociateName, _ = guests[eip.AssociateId]
+				rows[i].ServerPrivateIp = gnMap[eip.AssociateId]
 			case api.EIP_ASSOCIATE_TYPE_LOADBALANCER:
 				rows[i].AssociateName, _ = lbs[eip.AssociateId]
 			case api.EIP_ASSOCIATE_TYPE_NAT_GATEWAY:

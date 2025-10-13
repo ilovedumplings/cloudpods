@@ -16,7 +16,6 @@ package models
 
 import (
 	"context"
-	"fmt"
 	"reflect"
 	"sync"
 	"time"
@@ -92,6 +91,8 @@ func (manager *SMonitorResourceManager) GetModelSets() *MonitorResModelSets {
 	return manager.monitorResModelSets
 }
 
+// +onecloud:swagger-gen-model-singular=monitorresource
+// +onecloud:swagger-gen-model-plural=monitorresources
 type SMonitorResourceManager struct {
 	db.SVirtualResourceBaseManager
 	db.SEnabledResourceBaseManager
@@ -168,7 +169,7 @@ func (manager *SMonitorResourceManager) DeleteMonitorResources(ctx context.Conte
 func (manager *SMonitorResourceManager) GetMonitorResourceById(id string) (*SMonitorResource, error) {
 	iModel, err := db.FetchById(manager, id)
 	if err != nil {
-		return nil, errors.Wrapf(err, fmt.Sprintf("GetMonitorResourceById:%s err", id))
+		return nil, errors.Wrapf(err, "GetMonitorResourceById:%s err", id)
 	}
 	return iModel.(*SMonitorResource), nil
 }
@@ -202,6 +203,9 @@ func (manager *SMonitorResourceManager) FieldListFilter(q *sqlchemy.SQuery, quer
 	}
 	if len(query.ResName) != 0 {
 		q.Contains("name", query.ResName)
+	}
+	if len(query.AlertStates) != 0 {
+		q.In("alert_state", query.AlertStates)
 	}
 	return q
 }
@@ -262,22 +266,24 @@ func (man *SMonitorResourceManager) FetchCustomizeColumns(
 	return rows
 }
 
-func (self *SMonitorResource) AttachAlert(ctx context.Context, userCred mcclient.TokenCredential, alertId string) error {
+func (self *SMonitorResource) AttachAlert(ctx context.Context, userCred mcclient.TokenCredential, alertId string, metric string, match monitor.EvalMatch) (*SMonitorResourceAlert, error) {
 	iModel, _ := db.NewModelObject(MonitorResourceAlertManager)
 	input := monitor.MonitorResourceJointCreateInput{
 		MonitorResourceId: self.ResId,
 		AlertId:           alertId,
 		AlertState:        monitor.MONITOR_RESOURCE_ALERT_STATUS_ATTACH,
+		Metric:            metric,
+		Data:              match,
 	}
 	data := input.JSON(&input)
 	err := data.Unmarshal(iModel)
 	if err != nil {
-		return errors.Wrap(err, "MonitorResourceJointCreateInput unmarshal to joint err")
+		return nil, errors.Wrap(err, "MonitorResourceJointCreateInput unmarshal to joint err")
 	}
 	if err := MonitorResourceAlertManager.TableSpec().Insert(ctx, iModel); err != nil {
-		return errors.Wrap(err, "insert MonitorResourceJoint model err")
+		return nil, errors.Wrap(err, "insert MonitorResourceJoint model err")
 	}
-	return nil
+	return iModel.(*SMonitorResourceAlert), nil
 }
 
 func (self *SMonitorResource) UpdateAlertState() error {
@@ -379,21 +385,43 @@ func (manager *SMonitorResourceManager) GetPropertyAlert(ctx context.Context, us
 	return result, nil
 }
 
-func (manager *SMonitorResourceManager) UpdateMonitorResourceAttachJoint(ctx context.Context,
-	userCred mcclient.TokenCredential, alertRecord *SAlertRecord) error {
-	//if !utils.IsInStringArray(alertRecord.ResType, []string{monitor.METRIC_RES_TYPE_HOST,
-	//	monitor.METRIC_RES_TYPE_GUEST, monitor.METRIC_RES_TYPE_AGENT}) {
-	//	return nil
-	//}
-	resType := alertRecord.ResType
+func (manager *SMonitorResourceManager) UpdateMonitorResourceAttachJointByRecord(ctx context.Context, userCred mcclient.TokenCredential, record *SAlertRecord) error {
+	matches, _ := record.GetEvalData()
+	input := &UpdateMonitorResourceAlertInput{
+		AlertId:       record.AlertId,
+		Matches:       matches,
+		ResType:       record.ResType,
+		AlertState:    record.State,
+		SendState:     record.SendState,
+		TriggerTime:   record.CreatedAt,
+		AlertRecordId: record.GetId(),
+	}
+	if err := manager.UpdateMonitorResourceAttachJoint(ctx, userCred, input); err != nil {
+		return errors.Wrap(err, "UpdateMonitorResourceAttachJoint")
+	}
+	return nil
+}
+
+type UpdateMonitorResourceAlertInput struct {
+	AlertId       string
+	Matches       []monitor.EvalMatch
+	ResType       string
+	AlertState    string
+	SendState     string
+	TriggerTime   time.Time
+	AlertRecordId string
+}
+
+func (manager *SMonitorResourceManager) UpdateMonitorResourceAttachJoint(ctx context.Context, userCred mcclient.TokenCredential, input *UpdateMonitorResourceAlertInput) error {
+	resType := input.ResType
 	if resType == monitor.METRIC_RES_TYPE_AGENT {
 		resType = monitor.METRIC_RES_TYPE_GUEST
 	}
-	matches, _ := alertRecord.GetEvalData()
+	matches := input.Matches
 	errs := make([]error, 0)
 	matchResourceIds := make([]string, 0)
-	for _, matche := range matches {
-		resId := matche.Tags[monitor.MEASUREMENT_TAG_ID[alertRecord.ResType]]
+	for _, match := range matches {
+		resId := monitor.GetMeasurementResourceId(match.Tags, input.ResType)
 		if len(resId) == 0 {
 			continue
 		}
@@ -404,19 +432,30 @@ func (manager *SMonitorResourceManager) UpdateMonitorResourceAttachJoint(ctx con
 			continue
 		}
 		for _, res := range monitorResources {
-			err := res.UpdateAttachJoint(alertRecord, matche)
+			err := res.UpdateAttachJoint(ctx, userCred, input, match)
 			if err != nil {
-				errs = append(errs, err)
+				errs = append(errs, errors.Wrap(err, "UpdateAttachJoint"))
 			}
 		}
 	}
-	resourceAlerts, err := MonitorResourceAlertManager.GetJoinsByListInput(monitor.MonitorResourceJointListInput{AlertId: alertRecord.AlertId})
+	resourceAlerts, err := MonitorResourceAlertManager.GetJoinsByListInput(monitor.MonitorResourceJointListInput{
+		AlertId:    input.AlertId,
+		AlertState: input.AlertState,
+	})
 	if err != nil {
-		return errors.Wrapf(err, "get monitor_resource_joint by alertId:%s err", alertRecord.AlertId)
+		return errors.Wrapf(err, "get monitor_resource_joint by alertId: %s", input.AlertId)
 	}
 	deleteJointIds := make([]int64, 0)
 	for _, joint := range resourceAlerts {
-		if utils.IsInStringArray(joint.MonitorResourceId, matchResourceIds) {
+		metricName := joint.Metric
+		isMetricFound := false
+		for _, match := range matches {
+			if match.Metric == metricName {
+				isMetricFound = true
+				break
+			}
+		}
+		if utils.IsInStringArray(joint.MonitorResourceId, matchResourceIds) && isMetricFound {
 			continue
 		}
 		deleteJointIds = append(deleteJointIds, joint.RowId)
@@ -424,37 +463,56 @@ func (manager *SMonitorResourceManager) UpdateMonitorResourceAttachJoint(ctx con
 	if len(deleteJointIds) != 0 {
 		err = MonitorResourceAlertManager.DetachJoint(ctx, userCred, monitor.MonitorResourceJointListInput{JointId: deleteJointIds})
 		if err != nil {
-			return errors.Wrapf(err, "DetachJoint by alertId:%s err", alertRecord.AlertId)
+			return errors.Wrapf(err, "DetachJoint by alertId:%s err", input.AlertId)
 		}
 	}
 	return errors.NewAggregate(errs)
 }
 
-func (self *SMonitorResource) UpdateAttachJoint(alertRecord *SAlertRecord, match monitor.EvalMatch) error {
-	joints, err := MonitorResourceAlertManager.GetJoinsByListInput(monitor.MonitorResourceJointListInput{MonitorResourceId: self.
-		ResId, AlertId: alertRecord.AlertId})
+func (self *SMonitorResource) UpdateAttachJoint(ctx context.Context, userCred mcclient.TokenCredential, input *UpdateMonitorResourceAlertInput, match monitor.EvalMatch) error {
+	joints, err := MonitorResourceAlertManager.GetJoinsByListInput(
+		monitor.MonitorResourceJointListInput{
+			MonitorResourceId: self.ResId,
+			AlertId:           input.AlertId,
+			Metric:            match.Metric,
+		})
 	if err != nil {
-		return errors.Wrapf(err, "SMonitorResource:%s UpdateAttachJoint err", self.Name)
+		return errors.Wrapf(err, "SMonitorResource: %s(%s) get joints by monitorResourceId %q , metric %q and alertId %q", self.Name, self.Id, self.ResId, match.Metric, input.AlertId)
 	}
 	errs := make([]error, 0)
-	// 报警时发现没有进行关联，增加attach
-	if len(joints) == 0 {
-		self.AttachAlert(context.Background(), nil, alertRecord.AlertId)
-		joints, _ = MonitorResourceAlertManager.GetJoinsByListInput(monitor.
-			MonitorResourceJointListInput{MonitorResourceId: self.
-			ResId, AlertId: alertRecord.AlertId})
-	}
+	updateJoints := make([]SMonitorResourceAlert, 0)
 	for _, joint := range joints {
-		err := joint.UpdateAlertRecordData(alertRecord, &match)
-		if err != nil {
-			errs = append(errs, errors.Wrapf(err, "joint %s:%s %s:%s UpdateAlertRecordData err",
-				MonitorResourceAlertManager.GetMasterFieldName(), self.ResId,
-				MonitorResourceAlertManager.GetSlaveFieldName(), alertRecord.AlertId))
+		if joint.Metric == match.Metric {
+			tmpJoint := joint
+			updateJoints = append(updateJoints, tmpJoint)
 		}
 	}
-	self.UpdateAlertState()
+	// 报警时发现没有进行关联，增加attach
+	if len(updateJoints) == 0 {
+		newJoint, err := self.AttachAlert(ctx, userCred, input.AlertId, match.Metric, match)
+		if err != nil {
+			log.Errorf("attach alert error: %s", err)
+		}
+		log.Infof("Attach Alert joint: %#v, match: %s", newJoint, jsonutils.Marshal(match))
+		if err := newJoint.UpdateAlertRecordData(input, &match); err != nil {
+			errs = append(errs, errors.Wrapf(err, "new joint %s:%s %s:%s UpdateAlertRecordData err",
+				MonitorResourceAlertManager.GetMasterFieldName(), self.ResId,
+				MonitorResourceAlertManager.GetSlaveFieldName(), input.AlertId))
+		}
+	} else {
+		for _, joint := range updateJoints {
+			err := joint.UpdateAlertRecordData(input, &match)
+			if err != nil {
+				errs = append(errs, errors.Wrapf(err, "joint %s:%s %s:%s UpdateAlertRecordData err",
+					MonitorResourceAlertManager.GetMasterFieldName(), self.ResId,
+					MonitorResourceAlertManager.GetSlaveFieldName(), input.AlertId))
+			}
+		}
+	}
+	if err := self.UpdateAlertState(); err != nil {
+		errs = append(errs, errors.Wrapf(err, "UpdateAlertState"))
+	}
 	return errors.NewAggregate(errs)
-
 }
 
 func (manager *SMonitorResourceManager) GetResourceObj(id string) (bool, jsonutils.JSONObject) {

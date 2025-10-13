@@ -47,11 +47,6 @@ PKGS := go list ./...
 CGO_CFLAGS_ENV = $(shell go env CGO_CFLAGS)
 CGO_LDFLAGS_ENV = $(shell go env CGO_LDFLAGS)
 
-ifdef LIBQEMUIO_PATH
-		X_CGO_CFLAGS := ${CGO_CFLAGS_ENV} -I${LIBQEMUIO_PATH}/src -I${LIBQEMUIO_PATH}/src/include
-		X_CGO_LDFLAGS := ${CGO_LDFLAGS_ENV} -laio -lqemuio -lpthread -lgnutls -lnettle -L ${LIBQEMUIO_PATH}/src
-endif
-
 export GOOS ?= linux
 export GO111MODULE:=on
 export CGO_CFLAGS = ${X_CGO_CFLAGS}
@@ -63,7 +58,7 @@ ifeq ($(UNAME), Linux)
 XARGS_FLAGS = --no-run-if-empty
 endif
 
-cmdTargets:=$(filter-out cmd/host-image,$(wildcard cmd/*))
+cmdTargets:=$(wildcard cmd/*)
 rpmTargets:=$(foreach b,$(patsubst cmd/%,%,$(cmdTargets)),$(if $(shell [ -f "$(CURDIR)/build/$(b)/vars" ] && echo 1),rpm/$(b)))
 debTargets:=$(foreach b,$(patsubst cmd/%,%,$(cmdTargets)),$(if $(shell [ -f "$(CURDIR)/build/$(b)/vars" ] && echo 1),deb/$(b)))
 
@@ -81,7 +76,7 @@ gencopyright:
 	@bash scripts/gencopyright.sh pkg cmd
 
 test:
-	@go test $(GO_BUILD_FLAGS) $(shell go list ./... | egrep -v 'host-image|hostimage')
+	@go test $(GO_BUILD_FLAGS) $(shell go list ./... | egrep -v 'host-image|hostimage|torrent')
 
 vet:
 	go vet ./...
@@ -89,11 +84,8 @@ vet:
 # cmd/esxi-agent: prepare_dir
 # 	CGO_ENABLED=0 $(GO_BUILD) -o $(BIN_DIR)/$(shell basename $@) $(REPO_PREFIX)/$@
 
-cmd/fetcherfs: prepare_dir
-	CGO_ENABLED=0 $(GO_BUILD) -o $(BIN_DIR)/$(shell basename $@) $(REPO_PREFIX)/$@
-
 cmd/%: prepare_dir
-	$(GO_BUILD) -o $(BIN_DIR)/$(shell basename $@) $(REPO_PREFIX)/$@
+	CGO_ENABLED=0 $(GO_BUILD) -o $(BIN_DIR)/$(shell basename $@) $(REPO_PREFIX)/$@
 
 rpm/%: cmd/%
 	$(BUILD_SCRIPT) $*
@@ -189,7 +181,8 @@ goimports-check:
 		echo "$@: working tree modified (possibly by goimports)" >&2 ; \
 		echo "$@: " >&2 ; \
 		echo "$@: import spec should be grouped in order: std, 3rd-party, yunion.io/x, yunion.io/x/onecloud" >&2 ; \
-		echo "$@: see \"yun\" branch at https://github.com/yousong/tools" >&2 ; \
+		echo "$@: goimports should be installed by: \
+		echo "$@: git clone --depth 4 https://github.com/yunionio/tools && cd tools && go install ./cmd/goimports ; \
 		false ; \
 	fi
 .PHONY: goimports-check
@@ -286,8 +279,8 @@ RELEASE_BRANCH:=master
 GOPROXY ?= direct
 
 mod:
-	GOPROXY=$(GOPROXY) GONOSUMDB=yunion.io/x go get -d yunion.io/x/cloudmux@$(RELEASE_BRANCH)
-	GOPROXY=$(GOPROXY) GONOSUMDB=yunion.io/x go get -d $(patsubst %,%@master,$(shell GO111MODULE=on go mod edit -print  | sed -n -e 's|.*\(yunion.io/x/[a-z].*\) v.*|\1|p' | grep -v '/cloudmux$$'))
+	GOPROXY=$(GOPROXY) GONOSUMDB=yunion.io/x go get yunion.io/x/cloudmux@$(RELEASE_BRANCH)
+	GOPROXY=$(GOPROXY) GONOSUMDB=yunion.io/x go get $(patsubst %,%@master,$(shell GO111MODULE=on go mod edit -print  | sed -n -e 's|.*\(yunion.io/x/[a-z].*\) v.*|\1|p' | grep -v '/cloudmux$$'))
 	GOPROXY=$(GOPROXY) GONOSUMDB=yunion.io/x go mod tidy
 	GOPROXY=$(GOPROXY) GONOSUMDB=yunion.io/x go mod vendor -v
 

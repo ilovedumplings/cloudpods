@@ -77,6 +77,8 @@ type SInstanceBackup struct {
 	SizeMb int `nullable:"false" list:"user"`
 }
 
+// +onecloud:swagger-gen-model-singular=instancebackup
+// +onecloud:swagger-gen-model-plural=instancebackups
 type SInstanceBackupManager struct {
 	db.SVirtualResourceBaseManager
 	SManagedResourceBaseManager
@@ -179,6 +181,15 @@ func (manager *SInstanceBackupManager) QueryDistinctExtraField(q *sqlchemy.SQuer
 		return q, nil
 	}
 
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SInstanceBackupManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
+	}
 	return q, httperrors.ErrNotFound
 }
 

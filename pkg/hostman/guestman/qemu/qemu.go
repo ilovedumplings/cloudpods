@@ -33,6 +33,7 @@ const (
 	Version_4_2_0  Version = "4.2.0"
 	Version_4_0_1  Version = "4.0.1"
 	Version_2_12_1 Version = "2.12.1"
+	Version_9_0_1  Version = "9.0.1"
 )
 
 type Arch string
@@ -87,7 +88,7 @@ type QemuOptions interface {
 	Daemonize() string
 	Nodefaults() string
 	Nodefconfig() string
-	NoHpet() string
+	NoHpet() (bool, string)
 	Global() string
 	KeyboardLayoutLanguage(lang string) string
 	Name(name string) string
@@ -96,7 +97,7 @@ type QemuOptions interface {
 	MemDev(sizeMB uint64) string
 	MemFd(sizeMB uint64) string
 	Boot(order *string, enableMenu bool) string
-	BIOS(ovmfPath, homedir string) (string, error)
+	BIOS(ovmfPath, ovmfVarsPath, homedir string) (string, error)
 	Device(devStr string) string
 	Drive(driveStr string) string
 	Chardev(backend string, id string, name string) string
@@ -208,8 +209,8 @@ func (o baseOptions) Nodefaults() string {
 	return "-nodefaults"
 }
 
-func (o baseOptions) NoHpet() string {
-	return "-no-hpet"
+func (o baseOptions) NoHpet() (bool, string) {
+	return false, "-no-hpet"
 }
 
 func (o baseOptions) Nodefconfig() string {
@@ -271,17 +272,21 @@ func (o baseOptions) Boot(order *string, enableMenu bool) string {
 	return fmt.Sprintf("-boot %s", strings.Join(opts, ","))
 }
 
-func (o baseOptions) BIOS(ovmfPath, homedir string) (string, error) {
-	ovmfVarsPath := path.Join(homedir, "OVMF_VARS.fd")
-	if !fileutils2.Exists(ovmfVarsPath) {
-		err := procutils.NewRemoteCommandAsFarAsPossible("cp", "-f", ovmfPath, ovmfVarsPath).Run()
+func (o baseOptions) BIOS(ovmfPath, ovmfVarsPath, homedir string) (string, error) {
+	if ovmfVarsPath == "" || !fileutils2.Exists(ovmfVarsPath) {
+		ovmfVarsPath = ovmfPath
+	}
+
+	destOvmfVarsPath := path.Join(homedir, "OVMF_VARS.fd")
+	if !fileutils2.Exists(destOvmfVarsPath) {
+		err := procutils.NewRemoteCommandAsFarAsPossible("cp", "-f", ovmfVarsPath, destOvmfVarsPath).Run()
 		if err != nil {
 			return "", errors.Wrap(err, "failed copy ovmf vars")
 		}
 	}
 	return fmt.Sprintf(
 		"-drive if=pflash,format=raw,unit=0,file=%s,readonly=on -drive if=pflash,format=raw,unit=1,file=%s",
-		ovmfPath, ovmfVarsPath,
+		ovmfPath, destOvmfVarsPath,
 	), nil
 }
 
@@ -356,6 +361,30 @@ func newBaseOptions_x86_64() *baseOptions_x86_64 {
 	}
 }
 
+// qemu version grate or equal 8.0.0
+type baseOptions_ge_800_x86_64 struct {
+}
+
+func (o baseOptions_ge_800_x86_64) NoHpet() (bool, string) {
+	return true, "hpet=off"
+}
+
+func newBaseOptionsGE800_x86_64() *baseOptions_ge_800_x86_64 {
+	return &baseOptions_ge_800_x86_64{}
+}
+
+// qemu version grate or equal 3.1.0
+type baseOptions_ge_310 struct {
+}
+
+func (o baseOptions_ge_310) Nodefconfig() string {
+	return "-no-user-config"
+}
+
+func newBaseOptionsGE310() *baseOptions_ge_310 {
+	return &baseOptions_ge_310{}
+}
+
 type baseOptions_aarch64 struct {
 	*baseOptions
 }
@@ -370,6 +399,6 @@ func (o baseOptions_aarch64) Global() string {
 	return ""
 }
 
-func (o baseOptions_aarch64) NoHpet() string {
-	return ""
+func (o baseOptions_aarch64) NoHpet() (bool, string) {
+	return false, ""
 }

@@ -41,12 +41,15 @@ func InitHandlers(app *appsrv.Application) {
 	db.InitAllManagers()
 
 	taskman.AddTaskHandler("v1", app)
+
 	db.AddScopeResourceCountHandler("", app)
 
 	for _, manager := range []db.IModelManager{
 		taskman.TaskManager,
 		taskman.SubTaskManager,
 		taskman.TaskObjectManager,
+		taskman.ArchivedTaskManager,
+
 		db.UserCacheManager,
 		db.TenantCacheManager,
 		db.SharedResourceManager,

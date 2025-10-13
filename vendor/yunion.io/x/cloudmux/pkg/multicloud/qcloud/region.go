@@ -292,7 +292,7 @@ func (self *SRegion) getZoneById(id string) (*SZone, error) {
 			return &zones[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 }
 
 func (self *SRegion) GetIVpcs() ([]cloudprovider.ICloudVpc, error) {
@@ -332,6 +332,15 @@ func (self *SRegion) GetIZones() ([]cloudprovider.ICloudZone, error) {
 	return ret, nil
 }
 
+func getReplaceKey(zoneId string) string {
+	replceKey := map[string]string{"1": "一", "2": "二", "3": "三", "4": "四", "5": "五", "6": "六", "7": "七", "8": "八", "9": "九"}
+	info := strings.Split(zoneId, "-")
+	if len(info) >= 3 {
+		return replceKey[info[len(info)-1]]
+	}
+	return ""
+}
+
 func (self *SRegion) GetZones() ([]SZone, error) {
 	body, err := self.cvmRequest("DescribeZones", map[string]string{}, true)
 	if err != nil {
@@ -342,8 +351,30 @@ func (self *SRegion) GetZones() ([]SZone, error) {
 	if err != nil {
 		return nil, err
 	}
+	zoneName, zoneNameReplace := "", ""
+	zoneMap := map[string]bool{}
 	for i := 0; i < len(zones); i++ {
+		if len(zoneName) == 0 {
+			zoneName = zones[i].ZoneName
+			zoneNameReplace = getReplaceKey(zones[i].Zone)
+		}
 		zones[i].region = self
+		zoneMap[zones[i].Zone] = true
+	}
+	networks, err := self.GetNetworks(nil, "", "")
+	if err != nil {
+		return nil, errors.Wrapf(err, "GetNetworks")
+	}
+	for _, network := range networks {
+		if _, ok := zoneMap[network.Zone]; !ok {
+			zoneMap[network.Zone] = true
+			zone := SZone{region: self, Zone: network.Zone, ZoneState: "Unknown"}
+			newKey := getReplaceKey(network.Zone)
+			if len(zoneNameReplace) > 0 && len(newKey) > 0 {
+				zone.ZoneName = strings.Replace(zoneName, zoneNameReplace, newKey, 1)
+			}
+			zones = append(zones, zone)
+		}
 	}
 	return zones, nil
 }
@@ -498,6 +529,11 @@ func (self *SRegion) esRequest(apiName string, params map[string]string) (jsonut
 	return self.client.esRequest(apiName, params)
 }
 
+func (self *SRegion) wafRequest(apiName string, params map[string]string) (jsonutils.JSONObject, error) {
+	params["Region"] = self.Region
+	return self.client.wafRequest(apiName, params)
+}
+
 func (self *SRegion) memcachedRequest(apiName string, params map[string]string) (jsonutils.JSONObject, error) {
 	params["Region"] = self.Region
 	return self.client.memcachedRequest(apiName, params)
@@ -554,7 +590,7 @@ func (self *SRegion) GetNetwork(id string) (*SNetwork, error) {
 			return &networks[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 }
 
 func (self *SRegion) getStoragecache() *SStoragecache {
@@ -562,35 +598,6 @@ func (self *SRegion) getStoragecache() *SStoragecache {
 		self.storageCache = &SStoragecache{region: self}
 	}
 	return self.storageCache
-}
-
-func (self *SRegion) GetMatchInstanceTypes(cpu int, memMB int, gpu int, zoneId string) ([]SInstanceType, error) {
-	if self.instanceTypes == nil {
-		types, err := self.GetInstanceTypes()
-		if err != nil {
-			log.Errorf("GetInstanceTypes %s", err)
-			return nil, err
-		}
-		self.instanceTypes = types
-	}
-
-	var available []string
-	if len(zoneId) > 0 {
-		zone, err := self.getZoneById(zoneId)
-		if err != nil {
-			return nil, err
-		}
-		available = zone.getAvaliableInstanceTypes()
-	}
-	ret := make([]SInstanceType, 0)
-	for _, t := range self.instanceTypes {
-		if t.CPU == cpu && memMB == t.memoryMB() && gpu == t.GPU {
-			if available == nil || utils.IsInStringArray(t.InstanceType, available) {
-				ret = append(ret, t)
-			}
-		}
-	}
-	return ret, nil
 }
 
 func (self *SRegion) CreateInstanceSimple(name string, imgId string, cpu int, memGB int, storageType string, dataDiskSizesGB []int, networkId string, passwd string, publicKey string, secgroup string, tags map[string]string) (*SInstance, error) {
@@ -860,7 +867,7 @@ func (region *SRegion) GetIElasticcacheById(id string) (cloudprovider.ICloudElas
 				return &memcacheds[i], nil
 			}
 		}
-		return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+		return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 	}
 	caches, err := region.GetCloudElasticcaches(id)
 	if err != nil {

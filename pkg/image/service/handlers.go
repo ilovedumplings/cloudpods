@@ -42,6 +42,7 @@ func InitHandlers(app *appsrv.Application) {
 
 	quotas.AddQuotaHandler(&models.QuotaManager.SQuotaBaseManager, API_VERSION, app)
 	usages.AddUsageHandler(API_VERSION, app)
+
 	taskman.AddTaskHandler(API_VERSION, app)
 
 	app_common.ExportOptionsHandler(app, &options.Options)
@@ -50,6 +51,7 @@ func InitHandlers(app *appsrv.Application) {
 		taskman.TaskManager,
 		taskman.SubTaskManager,
 		taskman.TaskObjectManager,
+		taskman.ArchivedTaskManager,
 
 		db.UserCacheManager,
 		db.TenantCacheManager,

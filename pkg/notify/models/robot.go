@@ -29,7 +29,6 @@ import (
 	"yunion.io/x/sqlchemy"
 
 	"yunion.io/x/onecloud/pkg/apis"
-	"yunion.io/x/onecloud/pkg/apis/notify"
 	api "yunion.io/x/onecloud/pkg/apis/notify"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/httperrors"
@@ -156,8 +155,8 @@ func (r *SRobot) ValidateUpdateData(ctx context.Context, userCred mcclient.Token
 	}
 	if len(input.Address) > 0 {
 		// check Address
-		dirver := GetDriver(fmt.Sprintf("%s-robot", r.Type))
-		err := dirver.Send(ctx, api.SendParams{
+		driver := GetDriver(fmt.Sprintf("%s-robot", r.Type))
+		err := driver.Send(ctx, api.SendParams{
 			Header:  input.Header,
 			Body:    input.Body,
 			MsgKey:  input.MsgKey,
@@ -269,7 +268,7 @@ func (r *SRobot) PerformDisable(ctx context.Context, userCred mcclient.TokenCred
 }
 
 func (r *SRobot) PostDelete(ctx context.Context, userCred mcclient.TokenCredential) {
-	q := SubscriberManager.Query().Equals("type", notify.SUBSCRIBER_TYPE_ROBOT).Equals("identification", r.GetId())
+	q := SubscriberManager.Query().Equals("type", api.SUBSCRIBER_TYPE_ROBOT).Equals("identification", r.GetId())
 	subscribers := make([]SSubscriber, 0, 2)
 	err := db.FetchModelObjects(SubscriberManager, q, &subscribers)
 	if err != nil {

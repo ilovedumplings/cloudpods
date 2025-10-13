@@ -123,7 +123,7 @@ func (self *SBaremetalGuestDriver) GetRebuildRootStatus() ([]string, error) {
 	return []string{api.VM_READY, api.VM_ADMIN}, nil
 }
 
-func (self *SBaremetalGuestDriver) GetChangeConfigStatus(guest *models.SGuest) ([]string, error) {
+func (self *SBaremetalGuestDriver) GetChangeInstanceTypeStatus() ([]string, error) {
 	return nil, httperrors.NewUnsupportOperationError("Cannot change config for baremtal")
 }
 
@@ -163,9 +163,10 @@ func (self *SBaremetalGuestDriver) GetNamedNetworkConfiguration(guest *models.SG
 		reuseAddr := false
 		hn := host.GetAttach2Network(netConfig.Network)
 		if hn != nil && options.Options.BaremetalServerReuseHostIp {
-			if netConfig.Address == "" || netConfig.Address == hn.IpAddr {
+			if (netConfig.Address == "" && netConfig.Address6 == "") || (netConfig.Address == hn.IpAddr && netConfig.Address6 == hn.Ip6Addr) {
 				// try to reuse host network IP address
 				netConfig.Address = hn.IpAddr
+				netConfig.Address6 = hn.Ip6Addr
 				reuseAddr = true
 			}
 		}
@@ -175,8 +176,8 @@ func (self *SBaremetalGuestDriver) GetNamedNetworkConfiguration(guest *models.SG
 	return net, nil, "", false, nil
 }
 
-func (self *SBaremetalGuestDriver) GetRandomNetworkTypes() []string {
-	return []string{api.NETWORK_TYPE_BAREMETAL, api.NETWORK_TYPE_GUEST}
+func (self *SBaremetalGuestDriver) GetRandomNetworkTypes() []api.TNetworkType {
+	return []api.TNetworkType{api.NETWORK_TYPE_BAREMETAL, api.NETWORK_TYPE_GUEST}
 }
 
 func (self *SBaremetalGuestDriver) Attach2RandomNetwork(guest *models.SGuest, ctx context.Context, userCred mcclient.TokenCredential, host *models.SHost, netConfig *api.NetworkConfig, pendingUsage quotas.IQuota) ([]models.SGuestnetwork, error) {
@@ -184,9 +185,14 @@ func (self *SBaremetalGuestDriver) Attach2RandomNetwork(guest *models.SGuest, ct
 	netsAvaiable := make([]models.SNetwork, 0)
 	netifIndexs := make(map[string][]models.SNetInterface, 0)
 
-	netTypes := guest.GetDriver().GetRandomNetworkTypes()
+	drv, err := guest.GetDriver()
+	if err != nil {
+		return nil, err
+	}
+
+	netTypes := drv.GetRandomNetworkTypes()
 	if len(netConfig.NetType) > 0 {
-		netTypes = []string{netConfig.NetType}
+		netTypes = []api.TNetworkType{api.TNetworkType(netConfig.NetType)}
 	}
 	var wirePattern *regexp.Regexp
 	if len(netConfig.Wire) > 0 {
@@ -243,17 +249,20 @@ func (self *SBaremetalGuestDriver) Attach2RandomNetwork(guest *models.SGuest, ct
 			nicConfs = append(nicConfs, nicConf)
 		}
 		address := ""
+		address6 := ""
 		reuseAddr := false
 		hn := host.GetAttach2Network(net.Id)
 		if hn != nil && options.Options.BaremetalServerReuseHostIp {
 			// try to reuse host network IP address
 			address = hn.IpAddr
+			address6 = hn.Ip6Addr
 			reuseAddr = true
 		}
 		return guest.Attach2Network(ctx, userCred, models.Attach2NetworkArgs{
 			Network:             net,
 			PendingUsage:        pendingUsage,
 			IpAddr:              address,
+			Ip6Addr:             address6,
 			NicDriver:           netConfig.Driver,
 			BwLimit:             netConfig.BwLimit,
 			Virtual:             netConfig.Vip,
@@ -358,7 +367,7 @@ func (self *SBaremetalGuestDriver) RequestStopGuestForDelete(ctx context.Context
 		!guest.PendingDeleted &&
 		!overridePendingDelete &&
 		!purge {
-		return guest.StartGuestStopTask(ctx, task.GetUserCred(), true, false, task.GetTaskId())
+		return guest.StartGuestStopTask(ctx, task.GetUserCred(), 0, true, false, task.GetTaskId())
 	}
 	if host != nil && !host.GetEnabled() && !purge {
 		return errors.Errorf("fail to contact baremetal")
@@ -412,6 +421,11 @@ func (self *SBaremetalGuestDriver) ValidateCreateData(ctx context.Context, userC
 			return nil, httperrors.NewInputParameterError("Invalid raid config: %v", err)
 		}
 	}
+	if input.BaremetalRootDiskMatcher != nil {
+		if err := baremetal.ValidateRootDiskMatcher(input.BaremetalRootDiskMatcher); err != nil {
+			return nil, httperrors.NewInputParameterError("Invalid root disk matcher: %v", err)
+		}
+	}
 	//if len(input.Disks) <= 0 {
 	//	return nil, httperrors.NewInputParameterError("Root disk must be present")
 	//}
@@ -461,7 +475,7 @@ func (self *SBaremetalGuestDriver) RequestRebuildRootDisk(ctx context.Context, g
 	return nil
 }
 
-func (self *SBaremetalGuestDriver) PerformStart(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, data *jsonutils.JSONDict) error {
+func (self *SBaremetalGuestDriver) PerformStart(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, data *jsonutils.JSONDict, parentTaskId string) error {
 	return guest.StartGueststartTask(ctx, userCred, data, "")
 }
 

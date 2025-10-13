@@ -16,6 +16,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
@@ -48,6 +49,7 @@ func (self *SStatusInfrasResourceBase) GetIStatusInfrasModel() IStatusInfrasMode
 	return self.GetVirtualObject().(IStatusInfrasModel)
 }
 
+// +onecloud:swagger-gen-ignore
 func (manager *SStatusInfrasResourceBaseManager) GetPropertyStatistics(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject) (*apis.StatusStatistic, error) {
 	im, ok := manager.GetVirtualObject().(IModelManager)
 	if !ok {
@@ -85,7 +87,7 @@ func (manager *SStatusInfrasResourceBaseManager) GetPropertyStatistics(ctx conte
 	return result, nil
 }
 
-// 更新资源状态
+// +onecloud:swagger-gen-ignore
 func (self *SStatusInfrasResourceBase) PerformStatus(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PerformStatusInput) (jsonutils.JSONObject, error) {
 	err := StatusBasePerformStatus(ctx, self.GetIStatusInfrasModel(), userCred, input)
 	if err != nil {
@@ -153,6 +155,27 @@ func (manager *SStatusInfrasResourceBaseManager) QueryDistinctExtraField(q *sqlc
 		return q, nil
 	}
 	return q, httperrors.ErrNotFound
+}
+
+func (manager *SStatusInfrasResourceBaseManager) CustomizedTotalCount(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, totalQ *sqlchemy.SQuery) (int, jsonutils.JSONObject, error) {
+	results := struct {
+		apis.TotalCountBase
+		StatusInfo []apis.StatusStatisticStatusInfo
+	}{}
+
+	err := totalQ.First(&results.TotalCountBase)
+	if err != nil && errors.Cause(err) != sql.ErrNoRows {
+		return -1, nil, errors.Wrapf(err, "First")
+	}
+
+	totalSQ := totalQ.ResetFields().SubQuery()
+	statQ := totalSQ.Query(totalSQ.Field("status"), sqlchemy.COUNT("total_count", totalSQ.Field("id")))
+	statQ = statQ.GroupBy(totalSQ.Field("status"))
+	err = statQ.All(&results.StatusInfo)
+	if err != nil {
+		return -1, nil, errors.Wrapf(err, "status query")
+	}
+	return results.Count, jsonutils.Marshal(results), nil
 }
 
 func (manager *SStatusInfrasResourceBaseManager) FetchCustomizeColumns(

@@ -180,6 +180,25 @@ func (q *TaskQueue) AppendTask(task ITask) *TaskQueue {
 	return q
 }
 
+func (q *TaskQueue) ClearTasks() {
+	for {
+		existTask := q.PopTask()
+		if existTask != nil {
+			log.Warningf("Clear task %s", existTask.GetName())
+		} else {
+			break
+		}
+	}
+}
+
+func (q *TaskQueue) DebugString() string {
+	str := ""
+	for e := q.objList.Front(); e != nil; e = e.Next() {
+		str += fmt.Sprintf("%s, ", e.Value.(ITask).GetName())
+	}
+	return str
+}
+
 type TaskFactory func(userCred mcclient.TokenCredential, bm IBaremetal, taskId string, data jsonutils.JSONObject) ITask
 
 type SBaremetalTaskBase struct {
@@ -342,8 +361,8 @@ func (self *SBaremetalTaskBase) EnsurePowerUp() error {
 	return nil
 }
 
-func (self *SBaremetalTaskBase) EnsureSSHReboot() error {
-	if err := self.Baremetal.SSHReboot(); err != nil {
+func (self *SBaremetalTaskBase) EnsureSSHReboot(ctx context.Context) error {
+	if err := self.Baremetal.SSHReboot(ctx); err != nil {
 		return errors.Wrap(err, "Ensure ssh reboot")
 	}
 
@@ -425,7 +444,7 @@ func (self *SBaremetalPXEBootTaskBase) InitPXEBootTask(ctx context.Context, args
 
 	if !self.Baremetal.HasBMC() {
 		// Try remote ssh reboot
-		if err := self.Baremetal.SSHReboot(); err != nil {
+		if err := self.Baremetal.SSHReboot(ctx); err != nil {
 			return errors.Wrap(err, "Try ssh reboot")
 		}
 	} else {
@@ -491,6 +510,6 @@ func (self *SBaremetalPXEBootTaskBase) GetName() string {
 	return "BaremetalPXEBootTaskBase"
 }
 
-func AdjustUEFIBootOrder(term *ssh.Client, bm IBaremetal) error {
-	return bm.AdjustUEFICurrentBootOrder(term)
+func AdjustUEFIBootOrder(ctx context.Context, term *ssh.Client, bm IBaremetal) error {
+	return bm.AdjustUEFICurrentBootOrder(ctx, term)
 }

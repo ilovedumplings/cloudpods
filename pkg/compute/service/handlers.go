@@ -25,6 +25,7 @@ import (
 	"yunion.io/x/onecloud/pkg/compute/capabilities"
 	"yunion.io/x/onecloud/pkg/compute/misc"
 	"yunion.io/x/onecloud/pkg/compute/models"
+	baremetalmodels "yunion.io/x/onecloud/pkg/compute/models/baremetal"
 	"yunion.io/x/onecloud/pkg/compute/options"
 	"yunion.io/x/onecloud/pkg/compute/specs"
 	"yunion.io/x/onecloud/pkg/compute/sshkeys"
@@ -37,6 +38,7 @@ func InitHandlers(app *appsrv.Application) {
 	db.RegistUserCredCacheUpdater()
 
 	db.AddScopeResourceCountHandler("", app)
+	db.AddHistoryDataCleanHandler("", app)
 
 	quotas.AddQuotaHandler(&models.QuotaManager.SQuotaBaseManager, "", app)
 	quotas.AddQuotaHandler(&models.RegionQuotaManager.SQuotaBaseManager, "", app)
@@ -50,7 +52,9 @@ func InitHandlers(app *appsrv.Application) {
 	capabilities.AddCapabilityHandler("", app)
 	specs.AddSpecHandler("", app)
 	sshkeys.AddSshKeysHandler("", app)
+
 	taskman.AddTaskHandler("", app)
+
 	misc.AddMiscHandler("", app)
 
 	app_common.ExportOptionsHandler(app, &options.Options)
@@ -59,6 +63,7 @@ func InitHandlers(app *appsrv.Application) {
 		taskman.TaskManager,
 		taskman.SubTaskManager,
 		taskman.TaskObjectManager,
+		taskman.ArchivedTaskManager,
 		db.UserCacheManager,
 		db.TenantCacheManager,
 		db.SharedResourceManager,
@@ -101,6 +106,8 @@ func InitHandlers(app *appsrv.Application) {
 
 		models.SnapshotPolicyDiskManager,
 		models.LoadbalancerSecurityGroupManager,
+
+		models.HostFileJointsManager,
 	} {
 		db.RegisterModelManager(manager)
 	}
@@ -143,6 +150,7 @@ func InitHandlers(app *appsrv.Application) {
 		models.InstanceSnapshotManager,
 		models.SnapshotManager,
 		models.SnapshotPolicyManager,
+		models.SnapshotPolicyResourceManager,
 		models.BaremetalagentManager,
 		models.LoadbalancerManager,
 		models.LoadbalancerListenerManager,
@@ -153,10 +161,12 @@ func InitHandlers(app *appsrv.Application) {
 		models.LoadbalancerAclManager,
 		models.LoadbalancerAgentManager,
 		models.LoadbalancerClusterManager,
+		models.LoadbalancerHealthCheckManager,
 		models.RouteTableManager,
 		models.RouteTableAssociationManager,
 		models.RouteTableRouteSetManager,
 		models.InterVpcNetworkRouteSetManager,
+		models.GuestScreenDumpManager,
 
 		models.SchedpolicyManager,
 		models.DynamicschedtagManager,
@@ -207,11 +217,8 @@ func InitHandlers(app *appsrv.Application) {
 		models.ProjectMappingManager,
 
 		models.WafRuleGroupManager,
-		models.WafRuleGroupCacheManager,
 		models.WafIPSetManager,
-		models.WafIPSetCacheManager,
 		models.WafRegexSetManager,
-		models.WafRegexSetCacheManager,
 		models.WafInstanceManager,
 		models.WafRuleManager,
 
@@ -245,6 +252,12 @@ func InitHandlers(app *appsrv.Application) {
 		models.MiscResourceManager,
 
 		models.SSLCertificateManager,
+
+		baremetalmodels.BaremetalProfileManager,
+
+		models.HostFileManager,
+
+		models.AiGatewayManager,
 	} {
 		db.RegisterModelManager(manager)
 		handler := db.NewModelHandler(manager)
@@ -255,6 +268,7 @@ func InitHandlers(app *appsrv.Application) {
 		models.HostwireManagerDeprecated,
 		models.HostnetworkManager,
 		models.HoststorageManager,
+		models.HostBackupstorageManager,
 		models.HostschedtagManager,
 		models.HostIsolatedDeviceModelManager,
 		models.StorageschedtagManager,

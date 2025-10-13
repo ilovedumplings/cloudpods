@@ -53,11 +53,11 @@ func (user *SUser) GetInviteUrl() string {
 }
 
 func (user *SUser) AttachPolicy(policyArn string, policyType api.TPolicyType) error {
-	return user.client.AttachUserPolicy(user.UserName, user.client.getIamArn(policyArn))
+	return user.client.AttachUserPolicy(user.UserName, policyArn)
 }
 
 func (user *SUser) DetachPolicy(policyArn string, policyType api.TPolicyType) error {
-	return user.client.DetachUserPolicy(user.UserName, user.client.getIamArn(policyArn))
+	return user.client.DetachUserPolicy(user.UserName, policyArn)
 }
 
 func (user *SUser) GetGlobalId() string {
@@ -78,6 +78,15 @@ func (user *SUser) IsConsoleLogin() bool {
 		return false
 	}
 	return true
+}
+
+func (user *SUser) SetDisable() error {
+	return user.client.DeleteLoginProfile(user.UserName)
+}
+
+func (user *SUser) SetEnable(opts *cloudprovider.SClouduserEnableOptions) error {
+	_, err := user.client.CreateLoginProfile(user.UserName, opts.Password, opts.PasswordResetRequired)
+	return err
 }
 
 func (user *SUser) GetICloudgroups() ([]cloudprovider.ICloudgroup, error) {
@@ -239,7 +248,7 @@ func (self *SAwsClient) CreateIClouduser(conf *cloudprovider.SClouduserCreateCon
 		return nil, errors.Wrap(err, "CreateUser")
 	}
 	if len(conf.Password) > 0 {
-		_, err := self.CreateLoginProfile(conf.Name, conf.Password)
+		_, err := self.CreateLoginProfile(conf.Name, conf.Password, false)
 		if err != nil {
 			log.Errorf("failed to create loginProfile for user %s error: %v", conf.Name, err)
 		}
@@ -313,10 +322,13 @@ func (self *SAwsClient) DeleteLoginProfile(name string) error {
 	return self.iamRequest("DeleteLoginProfile", params, nil)
 }
 
-func (self *SAwsClient) CreateLoginProfile(name, password string) (*SLoginProfile, error) {
+func (self *SAwsClient) CreateLoginProfile(name, password string, reset bool) (*SLoginProfile, error) {
 	params := map[string]string{
 		"UserName": name,
 		"Password": password,
+	}
+	if reset {
+		params["PasswordResetRequired"] = "true"
 	}
 	loginProfile := &SLoginProfile{}
 	err := self.iamRequest("CreateLoginProfile", params, loginProfile)
@@ -338,7 +350,7 @@ func (self *SAwsClient) ResetUserPassword(name, password string) error {
 	_, err := self.GetLoginProfile(name)
 	if err != nil {
 		if errors.Cause(err) == cloudprovider.ErrNotFound {
-			_, err = self.CreateLoginProfile(name, password)
+			_, err = self.CreateLoginProfile(name, password, false)
 			return err
 		}
 		return errors.Wrap(err, "GetLoginProfile")

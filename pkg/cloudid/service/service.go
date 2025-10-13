@@ -30,12 +30,13 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
 	"yunion.io/x/onecloud/pkg/cloudcommon/cronman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
+	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/notifyclient"
 	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
 	_ "yunion.io/x/onecloud/pkg/cloudid/drivers"
 	"yunion.io/x/onecloud/pkg/cloudid/models"
 	"yunion.io/x/onecloud/pkg/cloudid/options"
-	_ "yunion.io/x/onecloud/pkg/cloudid/policy"
+	"yunion.io/x/onecloud/pkg/cloudid/policy"
 	"yunion.io/x/onecloud/pkg/cloudid/saml"
 	_ "yunion.io/x/onecloud/pkg/cloudid/tasks"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
@@ -47,6 +48,7 @@ func StartService() {
 	baseOpts := &opts.BaseOptions
 	commonOpts := &opts.CommonOptions
 	common_options.ParseOptions(opts, os.Args, "cloudid.conf", api.SERVICE_TYPE)
+	policy.Init()
 
 	app_common.InitAuth(commonOpts, func() {
 		log.Infof("Auth complete!!")
@@ -84,11 +86,18 @@ func StartService() {
 	}
 
 	if !opts.IsSlaveNode {
-		cron := cronman.InitCronJobManager(true, options.Options.CronJobWorkerCount)
+		err := taskman.TaskManager.InitializeData()
+		if err != nil {
+			log.Fatalf("TaskManager.InitializeData fail %s", err)
+		}
+
+		cron := cronman.InitCronJobManager(true, options.Options.CronJobWorkerCount, options.Options.TimeZone)
 		cron.AddJobAtIntervalsWithStartRun("SyncCloudaccountResources", time.Duration(opts.CloudIdResourceSyncIntervalHours)*time.Hour, models.CloudaccountManager.SyncCloudaccountResources, true)
 		cron.AddJobAtIntervalsWithStartRun("SyncCloudproviderResources", time.Duration(opts.CloudIdResourceSyncIntervalHours)*time.Hour, models.CloudproviderManager.SyncCloudproviderResources, true)
 
 		cron.AddJobEveryFewHour("AutoPurgeSplitable", 4, 30, 0, db.AutoPurgeSplitable, false)
+
+		cron.AddJobAtIntervalsWithStartRun("TaskCleanupJob", time.Duration(options.Options.TaskArchiveIntervalMinutes)*time.Minute, taskman.TaskManager.TaskCleanupJob, true)
 
 		cron.Start()
 		defer cron.Stop()

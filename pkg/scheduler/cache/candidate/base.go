@@ -377,12 +377,12 @@ func newBaseHostDesc(b *baseBuilder, host *computemodels.SHost, netGetter *netwo
 		return nil, fmt.Errorf("Fill networks error: %v", err)
 	}
 	// only onecloud host should fill onecloud vpc networks
-	if host.HostType == computeapi.HOST_TYPE_HYPERVISOR {
+	if sets.NewString(computeapi.HOST_TYPE_HYPERVISOR, computeapi.HOST_TYPE_CONTAINER).Has(host.HostType) && len(host.ManagerId) == 0 {
 		if err := desc.fillOnecloudVpcNetworks(netGetter); err != nil {
 			return nil, fmt.Errorf("Fill onecloud vpc networks error: %v", err)
 		}
 	}
-	if host.HostType == computeapi.HOST_TYPE_CLOUDPODS {
+	if sets.NewString(computeapi.HOST_TYPE_HYPERVISOR, computeapi.HOST_TYPE_BAREMETAL).Has(host.HostType) && len(host.ManagerId) > 0 {
 		if err := desc.fillCloudpodsVpcNetworks(netGetter); err != nil {
 			return nil, fmt.Errorf("Fill cloudpods vpc networks error: %v", err)
 		}
@@ -443,7 +443,7 @@ func (b BaseHostDesc) GetSchedDesc() *jsonutils.JSONDict {
 func (b *BaseHostDesc) GetPendingUsage() *schedmodels.SPendingUsage {
 	usage, err := schedmodels.HostPendingUsageManager.GetPendingUsage(b.GetId())
 	if err != nil {
-		return schedmodels.NewPendingUsageBySchedInfo(b.GetId(), nil)
+		return schedmodels.NewPendingUsageBySchedInfo(b.GetId(), nil, nil)
 	}
 	return usage
 }
@@ -777,11 +777,15 @@ func (b *BaseHostDesc) fillOnecloudVpcNetworks(netGetter *networkGetter) error {
 }
 
 func (b *BaseHostDesc) GetHypervisorDriver() computemodels.IGuestDriver {
-	hypervisor := computeapi.HOSTTYPE_HYPERVISOR[b.HostType]
-	if hypervisor == "" {
+	if b.Region == nil {
 		return nil
 	}
-	return computemodels.GetDriver(hypervisor)
+	hostDriver, _ := computemodels.GetHostDriver(b.HostType, b.Region.Provider)
+	if hostDriver == nil {
+		return nil
+	}
+	driver, _ := computemodels.GetDriver(hostDriver.GetHypervisor(), b.Region.Provider)
+	return driver
 }
 
 func (b *BaseHostDesc) fillStorages(host *computemodels.SHost) error {
@@ -796,12 +800,9 @@ func (b *BaseHostDesc) fillStorages(host *computemodels.SHost) error {
 			SStorage:           &storage,
 			ActualFreeCapacity: storage.Capacity - storage.ActualCapacityUsed,
 		}
-		if b.GetHypervisorDriver() == nil {
+		driver := b.GetHypervisorDriver()
+		if driver == nil || driver.DoScheduleStorageFilter() {
 			cs.FreeCapacity = storage.GetFreeCapacity()
-		} else {
-			if b.GetHypervisorDriver().DoScheduleStorageFilter() {
-				cs.FreeCapacity = storage.GetFreeCapacity()
-			}
 		}
 		ss = append(ss, cs)
 	}
@@ -883,7 +884,10 @@ func (h *BaseHostDesc) getQuotaKeys(s *api.SchedInfo) computemodels.SComputeReso
 	}
 	computeKeys.RegionId = h.Region.Id
 	computeKeys.ZoneId = h.Zone.Id
-	computeKeys.Hypervisor = computeapi.HOSTTYPE_HYPERVISOR[h.HostType]
+	driver, _ := computemodels.GetHostDriver(h.HostType, computeKeys.Provider)
+	if driver != nil {
+		computeKeys.Hypervisor = driver.GetHypervisor()
+	}
 	return computeKeys
 }
 

@@ -36,10 +36,14 @@ func (self *SNutanixHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_NUTANIX
 }
 
+func (self *SNutanixHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_NUTANIX
+}
+
 func (self *SNutanixHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	return nil
 }
 
 func (driver *SNutanixHostDriver) GetStoragecacheQuota(host *models.SHost) int {
-	return 100
+	return -1
 }

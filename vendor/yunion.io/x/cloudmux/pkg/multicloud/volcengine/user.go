@@ -90,6 +90,15 @@ func (user *SUser) GetICloudpolicies() ([]cloudprovider.ICloudpolicy, error) {
 	return ret, nil
 }
 
+func (user *SUser) SetDisable() error {
+	return user.client.DeleteLoginProfile(user.UserName)
+}
+
+func (user *SUser) SetEnable(opts *cloudprovider.SClouduserEnableOptions) error {
+	login := true
+	return user.client.UpdateLoginProfile(user.UserName, opts.Password, &login, &opts.PasswordResetRequired, &opts.EnableMfa)
+}
+
 func (user *SUser) IsConsoleLogin() bool {
 	profile, err := user.client.GetLoginProfile(user.UserName)
 	if err != nil {
@@ -99,7 +108,7 @@ func (user *SUser) IsConsoleLogin() bool {
 }
 
 func (user *SUser) ResetPassword(password string) error {
-	return user.client.UpdateLoginProfile(user.UserName, password, nil)
+	return user.client.UpdateLoginProfile(user.UserName, password, nil, nil, nil)
 }
 
 func (user *SUser) AttachPolicy(policyName string, policyType api.TPolicyType) error {
@@ -225,13 +234,34 @@ func (self *SVolcEngineClient) CreateLoginProfile(name, password string, loginAl
 	return err
 }
 
-func (self *SVolcEngineClient) UpdateLoginProfile(name, password string, loginAllowd *bool) error {
+func (self *SVolcEngineClient) DeleteLoginProfile(name string) error {
+	params := map[string]string{
+		"UserName": name,
+	}
+	_, err := self.iamRequest("", "DeleteLoginProfile", params)
+	return err
+}
+
+func (self *SVolcEngineClient) UpdateLoginProfile(name, password string, loginAllowd *bool, reset, mfa *bool) error {
 	params := map[string]string{
 		"UserName": name,
 		"Password": password,
 	}
 	if loginAllowd != nil {
 		params["LoginAllowed"] = fmt.Sprintf("%v", *loginAllowd)
+	}
+	if reset != nil {
+		params["PasswordResetRequired"] = "false"
+		if *reset {
+			params["PasswordResetRequired"] = "true"
+		}
+	}
+	if mfa != nil {
+		params["SafeAuthFlag"] = "false"
+		if *mfa {
+			params["SafeAuthFlag"] = "true"
+			params["SafeAuthType"] = "vmfa"
+		}
 	}
 	_, err := self.iamRequest("", "UpdateLoginProfile", params)
 	return err

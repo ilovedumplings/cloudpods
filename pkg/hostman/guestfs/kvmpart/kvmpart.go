@@ -70,6 +70,8 @@ func (p *SKVMGuestDiskPartition) GetPhysicalPartitionType() string {
 	idxP := strings.LastIndexByte(dev, 'p')
 	if idxP > 0 {
 		dev = dev[:idxP]
+	} else {
+		dev = strings.TrimRight(dev, "0123456789")
 	}
 	cmd := fmt.Sprintf(`fdisk -l %s | grep "Disk.*label type:"`, dev)
 	output, err := procutils.NewCommand("sh", "-c", cmd).Output()
@@ -95,7 +97,7 @@ func (p *SKVMGuestDiskPartition) IsReadonly() bool {
 }
 
 func (p *SKVMGuestDiskPartition) getFsFormat() string {
-	return fileutils2.GetFsFormat(p.partDev)
+	return fsutils.GetFsFormat(p.partDev)
 }
 
 func (p *SKVMGuestDiskPartition) MountPartReadOnly() bool {
@@ -190,13 +192,19 @@ func (p *SKVMGuestDiskPartition) mount(readonly bool) error {
 				errChan <- err
 			}
 		}()
+
+		// mount timeout
+		waitTime := time.Second * 30
+		if fsType == "ntfs-3g" {
+			waitTime = time.Second * 5
+		}
 		select {
 		case err = <-errChan:
 			if err != nil {
 				return false, err
 			}
 			return true, nil
-		case <-time.After(time.Second * 3):
+		case <-time.After(waitTime):
 			if fsType == "ntfs-3g" {
 				if err = procutils.NewCommand("mountpoint", p.mountPath).Run(); err != nil {
 					// mountpath is not a mountpoint
@@ -249,6 +257,9 @@ func (p *SKVMGuestDiskPartition) fsck() error {
 	case "ntfs":
 		checkCmd = []string{"ntfsfix", "-n", p.partDev}
 		fixCmd = []string{"ntfsfix", p.partDev}
+	case "f2fs":
+		checkCmd = []string{"fsck.f2fs", "-f", p.partDev}
+		fixCmd = []string{"fsck.f2fs", "-a", p.partDev}
 	}
 	if len(checkCmd) > 0 {
 		_, err := procutils.NewCommand(checkCmd[0], checkCmd[1:]...).Output()
@@ -430,7 +441,7 @@ func (p *SKVMGuestDiskPartition) zerofreeFsInternal(fs string) error {
 	}
 	// make partition
 	uuid := uuids["UUID"]
-	err = fsutils.FormatPartition(p.partDev, fs, uuid)
+	err = fsutils.FormatPartition(p.partDev, fs, uuid, nil)
 	if err != nil {
 		return errors.Wrapf(err, "FormatPartition %s %s %s", p.partDev, fs, uuid)
 	}

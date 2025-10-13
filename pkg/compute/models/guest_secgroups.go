@@ -44,7 +44,12 @@ func (self *SGuest) PerformAddSecgroup(
 		return nil, httperrors.NewInputParameterError("Cannot add security groups in status %s", self.Status)
 	}
 
-	maxCount := self.GetDriver().GetMaxSecurityGroupCount()
+	drv, err := self.GetDriver()
+	if err != nil {
+		return nil, err
+	}
+
+	maxCount := drv.GetMaxSecurityGroupCount()
 	if maxCount == 0 {
 		return nil, httperrors.NewUnsupportOperationError("Cannot add security groups for hypervisor %s", self.Hypervisor)
 	}
@@ -120,6 +125,7 @@ func (self *SGuest) saveDefaultSecgroupId(userCred mcclient.TokenCredential, sec
 	return nil
 }
 
+// 解绑安全组
 func (self *SGuest) PerformRevokeSecgroup(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
@@ -173,24 +179,26 @@ func (self *SGuest) PerformRevokeSecgroup(
 	return nil, self.StartSyncTask(ctx, userCred, true, "")
 }
 
-func (self *SGuest) PerformRevokeAdminSecgroup(
+// 解绑管理员安全组
+func (guest *SGuest) PerformRevokeAdminSecgroup(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
 	query jsonutils.JSONObject,
 	input api.GuestRevokeSecgroupInput,
 ) (jsonutils.JSONObject, error) {
-	if !db.IsAdminAllowPerform(ctx, userCred, self, "revoke-admin-secgroup") {
+	if !db.IsAdminAllowPerform(ctx, userCred, guest, "revoke-admin-secgroup") {
 		return nil, httperrors.NewForbiddenError("not allow to revoke admin secgroup")
 	}
 
-	if !utils.IsInStringArray(self.Status, []string{api.VM_READY, api.VM_RUNNING, api.VM_SUSPEND}) {
-		return nil, httperrors.NewInputParameterError("Cannot assign security rules in status %s", self.Status)
+	if !utils.IsInStringArray(guest.Status, []string{api.VM_READY, api.VM_RUNNING, api.VM_SUSPEND}) {
+		return nil, httperrors.NewInputParameterError("Cannot assign security rules in status %s", guest.Status)
 	}
 
 	var notes string
+	optAdminSecGrpId := options.Options.GetDefaultAdminSecurityGroupId(guest.Hypervisor)
 	adminSecgrpId := ""
-	if len(options.Options.DefaultAdminSecurityGroupId) > 0 {
-		adminSecgrp, _ := SecurityGroupManager.FetchSecgroupById(options.Options.DefaultAdminSecurityGroupId)
+	if len(optAdminSecGrpId) > 0 {
+		adminSecgrp, _ := SecurityGroupManager.FetchSecgroupById(optAdminSecGrpId)
 		if adminSecgrp != nil {
 			adminSecgrpId = adminSecgrp.Id
 			notes = fmt.Sprintf("reset admin secgroup to %s(%s)", adminSecgrp.Name, adminSecgrp.Id)
@@ -200,13 +208,13 @@ func (self *SGuest) PerformRevokeAdminSecgroup(
 		notes = "clean admin secgroup"
 	}
 
-	err := self.saveDefaultSecgroupId(userCred, adminSecgrpId, true)
+	err := guest.saveDefaultSecgroupId(userCred, adminSecgrpId, true)
 	if err != nil {
 		return nil, errors.Wrap(err, "saveDefaultSecgroupId")
 	}
 
-	logclient.AddActionLogWithContext(ctx, self, logclient.ACT_VM_REVOKESECGROUP, notes, userCred, true)
-	return nil, self.StartSyncTask(ctx, userCred, true, "")
+	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_VM_REVOKESECGROUP, notes, userCred, true)
+	return nil, guest.StartSyncTask(ctx, userCred, true, "")
 }
 
 // +onecloud:swagger-gen-ignore
@@ -219,6 +227,7 @@ func (self *SGuest) PerformAssignSecgroup(
 	return self.performAssignSecgroup(ctx, userCred, query, input, false)
 }
 
+// +onecloud:swagger-gen-ignore
 func (self *SGuest) PerformAssignAdminSecgroup(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
@@ -287,7 +296,12 @@ func (self *SGuest) PerformSetSecgroup(
 		return nil, httperrors.NewMissingParameterError("secgroup_ids")
 	}
 
-	maxCount := self.GetDriver().GetMaxSecurityGroupCount()
+	drv, err := self.GetDriver()
+	if err != nil {
+		return nil, err
+	}
+
+	maxCount := drv.GetMaxSecurityGroupCount()
 	if maxCount == 0 {
 		return nil, httperrors.NewUnsupportOperationError("Cannot set security group for this guest %s", self.Name)
 	}
@@ -387,8 +401,8 @@ func (self *SGuest) newGuestSecgroup(ctx context.Context, secgroupId string) err
 	return GuestsecgroupManager.TableSpec().Insert(ctx, gs)
 }
 
-func (self *SGuest) RevokeAllSecgroups(ctx context.Context, userCred mcclient.TokenCredential) error {
-	gss, err := self.GetGuestSecgroups()
+func (guest *SGuest) RevokeAllSecgroups(ctx context.Context, userCred mcclient.TokenCredential) error {
+	gss, err := guest.GetGuestSecgroups()
 	if err != nil {
 		return errors.Wrapf(err, "GetGuestSecgroups")
 	}
@@ -398,5 +412,5 @@ func (self *SGuest) RevokeAllSecgroups(ctx context.Context, userCred mcclient.To
 			return errors.Wrap(err, "Delete")
 		}
 	}
-	return self.saveDefaultSecgroupId(userCred, options.Options.DefaultSecurityGroupId, false)
+	return guest.saveDefaultSecgroupId(userCred, options.Options.GetDefaultSecurityGroupId(guest.Hypervisor), false)
 }

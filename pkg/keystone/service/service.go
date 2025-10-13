@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/log"
 	_ "yunion.io/x/sqlchemy/backends"
 
 	api "yunion.io/x/onecloud/pkg/apis/identity"
@@ -28,6 +29,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
 	"yunion.io/x/onecloud/pkg/cloudcommon/cronman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
+	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/notifyclient"
 	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
 	"yunion.io/x/onecloud/pkg/cloudcommon/policy"
@@ -35,7 +37,7 @@ import (
 	"yunion.io/x/onecloud/pkg/keystone/cronjobs"
 	"yunion.io/x/onecloud/pkg/keystone/models"
 	"yunion.io/x/onecloud/pkg/keystone/options"
-	_ "yunion.io/x/onecloud/pkg/keystone/policy"
+	kpolicy "yunion.io/x/onecloud/pkg/keystone/policy"
 	"yunion.io/x/onecloud/pkg/keystone/saml"
 	_ "yunion.io/x/onecloud/pkg/keystone/tasks"
 	"yunion.io/x/onecloud/pkg/keystone/tokens"
@@ -63,6 +65,7 @@ func StartService() {
 
 	opts := &options.Options
 	common_options.ParseOptions(opts, os.Args, "keystone.conf", api.SERVICE_TYPE)
+	kpolicy.Init()
 
 	if opts.Port == 0 {
 		opts.Port = 5000 // keystone well-known port
@@ -91,10 +94,22 @@ func StartService() {
 
 	common_options.StartOptionManagerWithSessionDriver(opts, opts.ConfigSyncPeriodSeconds, api.SERVICE_TYPE, "", options.OnOptionsChange, models.NewServiceConfigSession())
 
+	{
+		err := models.UserManager.EnforceUserMfa(context.Background())
+		if err != nil {
+			log.Errorf("EnforceUserMfa fail %s", err)
+		}
+	}
+
 	cache.Init(opts.TokenExpirationSeconds)
 
 	if !opts.IsSlaveNode {
-		cron := cronman.InitCronJobManager(true, opts.CronJobWorkerCount)
+		err := taskman.TaskManager.InitializeData()
+		if err != nil {
+			log.Fatalf("TaskManager.InitializeData fail %s", err)
+		}
+
+		cron := cronman.InitCronJobManager(true, opts.CronJobWorkerCount, options.Options.TimeZone)
 
 		cron.AddJobAtIntervalsWithStartRun("AutoSyncIdentityProviderTask", time.Duration(opts.AutoSyncIntervalSeconds)*time.Second, models.AutoSyncIdentityProviderTask, true)
 		cron.AddJobAtIntervalsWithStartRun("FetchScopeResourceCount", time.Duration(opts.FetchScopeResourceCountIntervalSeconds)*time.Second, cronjobs.FetchScopeResourceCount, false)
@@ -104,6 +119,10 @@ func StartService() {
 		cron.AddJobEveryFewDays("CheckAllUserPasswordIsExpired", 1, 8, 0, 0, models.CheckAllUserPasswordIsExpired, true)
 
 		cron.AddJobEveryFewHour("RemoveObsoleteInvalidTokens", 6, 0, 0, models.RemoveObsoleteInvalidTokens, true)
+
+		cron.AddJobAtIntervalsWithStartRun("TaskCleanupJob", time.Duration(options.Options.TaskArchiveIntervalMinutes)*time.Minute, taskman.TaskManager.TaskCleanupJob, true)
+
+		cron.AddJobEveryFewHour("CleanPasswordsJob", 4, 8, 0, models.PasswordManager.CleanPasswordsJob, true)
 
 		cron.Start()
 		defer cron.Stop()

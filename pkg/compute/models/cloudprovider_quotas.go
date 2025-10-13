@@ -54,6 +54,7 @@ func init() {
 	CloudproviderQuotaManager.SetVirtualObject(CloudproviderQuotaManager)
 }
 
+// +onecloud:swagger-gen-ignore
 type SCloudproviderQuota struct {
 	db.SStandaloneResourceBase
 	db.SExternalizedResourceBase
@@ -148,6 +149,15 @@ func (man *SCloudproviderQuotaManager) QueryDistinctExtraField(q *sqlchemy.SQuer
 		return q, nil
 	}
 	q, err = man.SManagedResourceBaseManager.QueryDistinctExtraField(q, field)
+	if err == nil {
+		return q, nil
+	}
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SCloudproviderQuotaManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
 	if err == nil {
 		return q, nil
 	}

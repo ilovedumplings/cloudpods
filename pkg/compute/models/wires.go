@@ -966,7 +966,10 @@ func (swire *SWire) getNetworks(ctx context.Context, userCred mcclient.TokenCred
 
 func (swire *SWire) getGatewayNetworkQuery(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
 	q := swire.getNetworkQuery(ctx, userCred, ownerId, scope)
-	q = q.IsNotNull("guest_gateway").IsNotEmpty("guest_gateway")
+	q = q.Filter(sqlchemy.OR(
+		sqlchemy.AND(sqlchemy.IsNotNull(q.Field("guest_gateway")), sqlchemy.IsNotEmpty(q.Field("guest_gateway"))),
+		sqlchemy.AND(sqlchemy.IsNotNull(q.Field("guest_gateway6")), sqlchemy.IsNotEmpty(q.Field("guest_gateway6"))),
+	))
 	q = q.Equals("status", api.NETWORK_STATUS_AVAILABLE)
 	return q
 }
@@ -1004,7 +1007,7 @@ func (swire *SWire) getPrivateNetworks(ctx context.Context, userCred mcclient.To
 	return nets, nil
 }
 
-func (swire *SWire) GetCandidatePrivateNetwork(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, isExit bool, serverTypes []string) (*SNetwork, error) {
+func (swire *SWire) GetCandidatePrivateNetwork(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, isExit bool, serverTypes []api.TNetworkType) (*SNetwork, error) {
 	nets, err := swire.getPrivateNetworks(ctx, userCred, ownerId, scope)
 	if err != nil {
 		return nil, err
@@ -1012,10 +1015,10 @@ func (swire *SWire) GetCandidatePrivateNetwork(ctx context.Context, userCred mcc
 	return ChooseCandidateNetworks(nets, isExit, serverTypes), nil
 }
 
-func (swire *SWire) GetCandidateAutoAllocNetwork(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, isExit bool, serverTypes []string) (*SNetwork, error) {
+func (swire *SWire) GetCandidateAutoAllocNetwork(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, isExit bool, serverTypes []api.TNetworkType) (*SNetwork, error) {
 	nets, err := swire.getAutoAllocNetworks(ctx, userCred, ownerId, scope)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "getAutoAllocNetworks with scope %s", scope)
 	}
 	return ChooseCandidateNetworks(nets, isExit, serverTypes), nil
 }
@@ -1023,11 +1026,11 @@ func (swire *SWire) GetCandidateAutoAllocNetwork(ctx context.Context, userCred m
 func (swire *SWire) GetCandidateNetworkForIp(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, ipAddr string) (*SNetwork, error) {
 	ip, err := netutils.NewIPV4Addr(ipAddr)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "netutils.NewIPV4Addr: %s", ipAddr)
 	}
 	netPrivates, err := swire.getPrivateNetworks(ctx, userCred, ownerId, scope)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "swire.getPrivateNetworks %s", swire.GetId())
 	}
 	for _, net := range netPrivates {
 		if net.IsAddressInRange(ip) {
@@ -1036,10 +1039,36 @@ func (swire *SWire) GetCandidateNetworkForIp(ctx context.Context, userCred mccli
 	}
 	netPublics, err := swire.getPublicNetworks(ctx, userCred, ownerId, scope)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "swire.getPublicNetworks %s", swire.GetId())
 	}
 	for _, net := range netPublics {
 		if net.IsAddressInRange(ip) {
+			return &net, nil
+		}
+	}
+	return nil, nil
+}
+
+func (swire *SWire) GetCandidateNetworkForIp6(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, ip6Addr string) (*SNetwork, error) {
+	ip6, err := netutils.NewIPV6Addr(ip6Addr)
+	if err != nil {
+		return nil, errors.Wrapf(err, "netutils.NewIPV6Addr: %s", ip6Addr)
+	}
+	netPrivates, err := swire.getPrivateNetworks(ctx, userCred, ownerId, scope)
+	if err != nil {
+		return nil, errors.Wrapf(err, "swire.getPrivateNetworks %s", swire.GetId())
+	}
+	for _, net := range netPrivates {
+		if net.IsAddress6InRange(ip6) {
+			return &net, nil
+		}
+	}
+	netPublics, err := swire.getPublicNetworks(ctx, userCred, ownerId, scope)
+	if err != nil {
+		return nil, errors.Wrapf(err, "swire.getPublicNetworks %s", swire.GetId())
+	}
+	for _, net := range netPublics {
+		if net.IsAddress6InRange(ip6) {
 			return &net, nil
 		}
 	}
@@ -1072,14 +1101,14 @@ func chooseNetworkByAddressCount(nets []*SNetwork) (*SNetwork, *SNetwork) {
 	return minSel, maxSel
 }
 
-func ChooseCandidateNetworks(nets []SNetwork, isExit bool, serverTypes []string) *SNetwork {
+func ChooseCandidateNetworks(nets []SNetwork, isExit bool, serverTypes []api.TNetworkType) *SNetwork {
 	matchingNets := make([]*SNetwork, 0)
 	notMatchingNets := make([]*SNetwork, 0)
 
 	for _, s := range serverTypes {
 		net := chooseCandidateNetworksByNetworkType(nets, isExit, s)
 		if net != nil {
-			if utils.IsInStringArray(net.ServerType, serverTypes) {
+			if api.IsInNetworkTypes(net.ServerType, serverTypes) {
 				matchingNets = append(matchingNets, net)
 			} else {
 				notMatchingNets = append(notMatchingNets, net)
@@ -1098,7 +1127,7 @@ func ChooseCandidateNetworks(nets []SNetwork, isExit bool, serverTypes []string)
 	return nil
 }
 
-func chooseCandidateNetworksByNetworkType(nets []SNetwork, isExit bool, serverType string) *SNetwork {
+func chooseCandidateNetworksByNetworkType(nets []SNetwork, isExit bool, serverType api.TNetworkType) *SNetwork {
 	matchingNets := make([]*SNetwork, 0)
 	notMatchingNets := make([]*SNetwork, 0)
 
@@ -1321,6 +1350,19 @@ func (manager *SWireManager) FetchWireByExternalId(managerId, extId string) (*SW
 
 func (manager *SWireManager) GetOnPremiseWireOfIp(ipAddr string) (*SWire, error) {
 	net, err := NetworkManager.GetOnPremiseNetworkOfIP(ipAddr, "", tristate.None)
+	if err != nil {
+		return nil, err
+	}
+	wire, _ := net.GetWire()
+	if wire != nil {
+		return wire, nil
+	} else {
+		return nil, fmt.Errorf("Wire not found")
+	}
+}
+
+func (manager *SWireManager) GetOnPremiseWireOfIp6(ip6Addr string) (*SWire, error) {
+	net, err := NetworkManager.GetOnPremiseNetworkOfIP6(ip6Addr, "", tristate.None)
 	if err != nil {
 		return nil, err
 	}
@@ -1617,6 +1659,15 @@ func (manager *SWireManager) QueryDistinctExtraField(q *sqlchemy.SQuery, field s
 	return q, httperrors.ErrNotFound
 }
 
+func (manager *SWireManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SVpcResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
+	}
+	return q, httperrors.ErrNotFound
+}
+
 type SWireUsageCount struct {
 	Id string
 	api.WireUsage
@@ -1855,6 +1906,7 @@ func (swire *SWire) GetDetailsTopology(ctx context.Context, userCred mcclient.To
 		for j := range hns {
 			host.Networks = append(host.Networks, api.HostnetworkTopologyOutput{
 				IpAddr:  hns[j].IpAddr,
+				Ip6Addr: hns[j].Ip6Addr,
 				MacAddr: hns[j].MacAddr,
 			})
 		}

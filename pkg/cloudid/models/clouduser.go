@@ -17,6 +17,7 @@ package models
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"gopkg.in/fatih/set.v0"
 
@@ -183,6 +184,28 @@ func (manager *SClouduserManager) QueryDistinctExtraField(q *sqlchemy.SQuery, fi
 	var err error
 	q, err = manager.SStatusDomainLevelUserResourceBaseManager.QueryDistinctExtraField(q, field)
 	if err == nil {
+		return q, nil
+	}
+
+	switch field {
+	case "manager":
+		managerQuery := CloudproviderManager.Query("name", "id").SubQuery()
+		q.AppendField(managerQuery.Field("name", field)).Distinct()
+		q = q.Join(managerQuery, sqlchemy.Equals(q.Field("manager_id"), managerQuery.Field("id")))
+		return q, nil
+	case "account":
+		accountQuery := CloudaccountManager.Query("name", "id").SubQuery()
+		providers := CloudproviderManager.Query("id", "cloudaccount_id").SubQuery()
+		q.AppendField(accountQuery.Field("name", field)).Distinct()
+		q = q.Join(providers, sqlchemy.Equals(q.Field("manager_id"), providers.Field("id")))
+		q = q.Join(accountQuery, sqlchemy.Equals(providers.Field("cloudaccount_id"), accountQuery.Field("id")))
+		return q, nil
+	case "provider", "brand":
+		accountQuery := CloudaccountManager.Query(field, "id").Distinct().SubQuery()
+		providers := CloudproviderManager.Query("id", "cloudaccount_id").SubQuery()
+		q.AppendField(accountQuery.Field(field)).Distinct()
+		q = q.Join(providers, sqlchemy.Equals(q.Field("manager_id"), providers.Field("id")))
+		q = q.Join(accountQuery, sqlchemy.Equals(providers.Field("cloudaccount_id"), accountQuery.Field("id")))
 		return q, nil
 	}
 	return q, httperrors.ErrNotFound
@@ -647,26 +670,6 @@ func (self *SClouduser) GetCloudpolicies() ([]SCloudpolicy, error) {
 	return policies, nil
 }
 
-func (self *SClouduser) GetSystemCloudpolicies() ([]SCloudpolicy, error) {
-	policies := []SCloudpolicy{}
-	q := self.GetCloudpolicyQuery().Equals("policy_type", api.CLOUD_POLICY_TYPE_SYSTEM)
-	err := db.FetchModelObjects(CloudpolicyManager, q, &policies)
-	if err != nil {
-		return nil, errors.Wrap(err, "db.FetchModelObjects")
-	}
-	return policies, nil
-}
-
-func (self *SClouduser) GetCustomCloudpolicies() ([]SCloudpolicy, error) {
-	policies := []SCloudpolicy{}
-	q := self.GetCloudpolicyQuery().Equals("policy_type", api.CLOUD_POLICY_TYPE_CUSTOM)
-	err := db.FetchModelObjects(CloudpolicyManager, q, &policies)
-	if err != nil {
-		return nil, errors.Wrap(err, "db.FetchModelObjects")
-	}
-	return policies, nil
-}
-
 func (self *SClouduser) joinGroup(groupId string) error {
 	gu := &SCloudgroupUser{}
 	gu.SetModelManager(CloudgroupUserManager, gu)
@@ -1120,8 +1123,8 @@ func (self *SCloudaccount) SyncCloudusers(
 	iUsers []cloudprovider.IClouduser,
 	managerId string,
 ) ([]SClouduser, []cloudprovider.IClouduser, compare.SyncResult) {
-	lockman.LockRawObject(ctx, ClouduserManager.Keyword(), self.Id)
-	defer lockman.ReleaseRawObject(ctx, ClouduserManager.Keyword(), self.Id)
+	lockman.LockRawObject(ctx, ClouduserManager.Keyword(), fmt.Sprintf("%s-%s", self.Id, managerId))
+	defer lockman.ReleaseRawObject(ctx, ClouduserManager.Keyword(), fmt.Sprintf("%s-%s", self.Id, managerId))
 
 	result := compare.SyncResult{}
 	dbUsers, err := self.GetCloudusers(managerId)

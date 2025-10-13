@@ -15,6 +15,10 @@
 package hostman
 
 import (
+	"fmt"
+	"strings"
+	"time"
+
 	execlient "yunion.io/x/executor/client"
 	"yunion.io/x/log"
 
@@ -24,21 +28,24 @@ import (
 	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
 	"yunion.io/x/onecloud/pkg/cloudcommon/service"
 	"yunion.io/x/onecloud/pkg/hostman/downloader"
+	"yunion.io/x/onecloud/pkg/hostman/guestfs/fsdriver"
 	"yunion.io/x/onecloud/pkg/hostman/guestman"
-	"yunion.io/x/onecloud/pkg/hostman/guestman/desc"
 	"yunion.io/x/onecloud/pkg/hostman/guestman/guesthandlers"
 	"yunion.io/x/onecloud/pkg/hostman/guestman/podhandlers"
 	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/deployclient"
 	"yunion.io/x/onecloud/pkg/hostman/hosthandler"
 	"yunion.io/x/onecloud/pkg/hostman/hostinfo"
+	"yunion.io/x/onecloud/pkg/hostman/hostinfo/hostpinger"
 	"yunion.io/x/onecloud/pkg/hostman/hostmetrics"
 	"yunion.io/x/onecloud/pkg/hostman/hostutils"
-	"yunion.io/x/onecloud/pkg/hostman/metadata"
 	"yunion.io/x/onecloud/pkg/hostman/options"
 	"yunion.io/x/onecloud/pkg/hostman/storageman"
 	"yunion.io/x/onecloud/pkg/hostman/storageman/diskhandlers"
 	"yunion.io/x/onecloud/pkg/hostman/storageman/storagehandler"
+	"yunion.io/x/onecloud/pkg/image/drivers/s3"
+	losetupman "yunion.io/x/onecloud/pkg/util/losetup/manager"
 	"yunion.io/x/onecloud/pkg/util/procutils"
+	"yunion.io/x/onecloud/pkg/util/qemuimg"
 	"yunion.io/x/onecloud/pkg/util/sysutils"
 )
 
@@ -67,18 +74,25 @@ func (host *SHostService) InitService() {
 		execlient.SetTimeoutSeconds(options.HostOptions.ExecutorConnectTimeoutSeconds)
 		procutils.SetRemoteExecutor()
 	}
+	losetupman.Init()
 }
 
 func (host *SHostService) OnExitService() {}
 
 func (host *SHostService) RunService() {
 	app := app_common.InitApp(&options.HostOptions.BaseOptions, false)
-	cronManager := cronman.InitCronJobManager(false, options.HostOptions.CronJobWorkerCount)
+	cronManager := cronman.InitCronJobManager(false, options.HostOptions.CronJobWorkerCount, options.HostOptions.TimeZone)
 	hostutils.Init()
 
+	if err := qemuimg.SetPreallocation(options.HostOptions.Qcow2Preallocation); err != nil {
+		log.Fatalf("failed set qemuimg preallocation to %s: %s", options.HostOptions.Qcow2Preallocation, err)
+	}
+
 	hostInstance := hostinfo.Instance()
-	if err := hostInstance.Init(); err != nil {
-		log.Fatalf("Host instance init error: %v", err)
+	if err := hostInstance.Init(app.GetContext()); err != nil {
+		log.Errorf("Host instance init error: %s, wait 3 minutes to retry", err)
+		time.Sleep(time.Minute * 3)
+		log.Fatalf("Host instance init error: %s, reboot now", err)
 	}
 
 	app_common.InitAuth(&options.HostOptions.CommonOptions, func() {
@@ -91,9 +105,11 @@ func (host *SHostService) RunService() {
 		log.Fatalf("Storage manager init error: %v", err)
 	}
 
+	initS3()
+
 	var guestChan chan struct{}
 
-	if err := guestman.Init(hostInstance, options.HostOptions.ServersPath); err != nil {
+	if err := guestman.Init(hostInstance, options.HostOptions.ServersPath, options.HostOptions.DeployConcurrent); err != nil {
 		log.Fatalf("guest manager init error: %s", err)
 	}
 	guestman.GetGuestManager().InitQemuMaxCpus(
@@ -112,30 +128,30 @@ func (host *SHostService) RunService() {
 		log.Fatalf("Guest manager Bootstrap %s", err)
 	}
 	// hostmetrics after guestmanager bootstrap
-	hostmetrics.Init()
+	hostmetrics.Init(hostInstance)
 	hostmetrics.Start()
+	fsdriver.Init("")
+
+	hostPinger := hostpinger.NewHostPingTask(options.HostOptions.PingRegionInterval, hostInstance)
+	if hostPinger != nil {
+		go hostPinger.Start()
+	}
 
 	host.initHandlers(app)
 
-	// Init Metadata handler
-	go metadata.Start(
-		app_common.InitApp(&options.HostOptions.BaseOptions, false),
-		&metadata.Service{
-			Address: options.HostOptions.Address,
-			Port:    options.HostOptions.Port + 1000,
-			DescGetter: metadata.DescGetterFunc(func(ip string) *desc.SGuestDesc {
-				guestDesc, _ := guestman.GetGuestManager().GetGuestNicDesc("", ip, "", "", false)
-				return guestDesc
-			}),
-		},
-	)
-
-	cronManager.AddJobEveryFewDays(
-		"CleanRecycleDiskFiles", 1, 3, 0, 0, storageman.CleanRecycleDiskfiles, false)
-	cronManager.Start()
+	{
+		cronManager.AddJobEveryFewDays(
+			"CleanRecycleDiskFiles", 1, 3, 0, 0, storageman.CleanRecycleDiskfiles, false)
+		cronManager.AddJobEveryFewDays(
+			"CleanImageCachefiles", 1, 3, 0, 0, storageman.CleanImageCachefiles, options.HostOptions.ImageCacheCleanupOnStartup)
+		cronManager.Start()
+	}
 
 	close(guestChan)
 	app_common.ServeForeverWithCleanup(app, &options.HostOptions.BaseOptions, func() {
+		if hostPinger != nil {
+			hostPinger.Stop()
+		}
 		hostinfo.Stop()
 		storageman.Stop()
 		hostmetrics.Stop()
@@ -154,6 +170,41 @@ func (host *SHostService) initHandlers(app *appsrv.Application) {
 	hosthandler.AddHostHandler("", app)
 
 	app_common.ExportOptionsHandler(app, &options.HostOptions)
+}
+
+func initS3() {
+	url := options.HostOptions.S3Endpoint
+	if len(url) == 0 {
+		return
+	}
+
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		prefix := "http://"
+		if options.HostOptions.S3UseSSL {
+			prefix = "https://"
+		}
+		url = prefix + url
+	}
+	err := s3.Init(
+		url,
+		options.HostOptions.S3AccessKey,
+		options.HostOptions.S3SecretKey,
+		options.HostOptions.S3BucketName,
+		options.HostOptions.S3UseSSL,
+		"",
+	)
+	if err != nil {
+		log.Fatalf("failed init s3 client %s", err)
+	}
+
+	lifecycle := fmt.Sprintf(
+		`<LifecycleConfiguration><Rule><ID>%s</ID><Prefix></Prefix><Status>Enabled</Status><Expiration><Days>%d</Days></Expiration></Rule></LifecycleConfiguration>`,
+		options.HostOptions.S3BucketName, options.HostOptions.S3BucketLifecycleKeepDay,
+	)
+	err = s3.SetBucketLifecycle(lifecycle)
+	if err != nil {
+		log.Fatalf("failed set bucket lifecycle %s", lifecycle)
+	}
 }
 
 func StartService() {

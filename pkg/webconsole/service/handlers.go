@@ -18,16 +18,21 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
+	"strings"
 
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/gotypes"
 	"yunion.io/x/pkg/util/httputils"
 	"yunion.io/x/pkg/util/regutils"
 
+	agapi "yunion.io/x/onecloud/pkg/apis/apigateway"
+	compute_api "yunion.io/x/onecloud/pkg/apis/compute"
 	webconsole_api "yunion.io/x/onecloud/pkg/apis/webconsole"
 	"yunion.io/x/onecloud/pkg/appsrv"
 	"yunion.io/x/onecloud/pkg/appsrv/dispatcher"
@@ -38,6 +43,8 @@ import (
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
 	modules "yunion.io/x/onecloud/pkg/mcclient/modules/compute"
 	"yunion.io/x/onecloud/pkg/mcclient/modules/k8s"
+	"yunion.io/x/onecloud/pkg/util/netutils2"
+	"yunion.io/x/onecloud/pkg/util/seclib2"
 	"yunion.io/x/onecloud/pkg/webconsole/command"
 	"yunion.io/x/onecloud/pkg/webconsole/models"
 	o "yunion.io/x/onecloud/pkg/webconsole/options"
@@ -59,6 +66,7 @@ func initHandlers(app *appsrv.Application) {
 	app.AddHandler("POST", ApiPathPrefix+"baremetal/<id>", auth.Authenticate(handleBaremetalShell))
 	app.AddHandler("POST", ApiPathPrefix+"ssh/<ip>", auth.Authenticate(handleSshShell))
 	app.AddHandler("POST", ApiPathPrefix+"server/<id>", auth.Authenticate(handleServerRemoteConsole))
+	app.AddHandler("POST", ApiPathPrefix+"adb/<id>/shell", auth.Authenticate(handleAdbShell))
 	app.AddHandler("POST", ApiPathPrefix+"server-rdp/<id>", auth.Authenticate(handleServerRemoteRDPConsole))
 	app.AddHandler("GET", ApiPathPrefix+"sftp/<session-id>/list", server.HandleSftpList)
 	app.AddHandler("GET", ApiPathPrefix+"sftp/<session-id>/download", server.HandleSftpDownload)
@@ -75,6 +83,9 @@ func initHandlers(app *appsrv.Application) {
 
 func fetchK8sEnv(ctx context.Context, w http.ResponseWriter, r *http.Request) (*command.K8sEnv, error) {
 	params, _, body := appsrv.FetchEnv(ctx, w, r)
+	if !gotypes.IsNil(body) && body.Contains("webconsole") {
+		body, _ = body.Get("webconsole")
+	}
 
 	k8sReq := webconsole_api.SK8sRequest{}
 	err := body.Unmarshal(&k8sReq)
@@ -100,7 +111,7 @@ func fetchK8sEnv(ctx context.Context, w http.ResponseWriter, r *http.Request) (*
 	if err != nil {
 		return nil, httperrors.NewNotFoundError("Not found cluster %q kubeconfig", k8sReq.Cluster)
 	}
-	f, err := ioutil.TempFile("", "kubeconfig-")
+	f, err := os.CreateTemp("", "kubeconfig-")
 	if err != nil {
 		return nil, fmt.Errorf("Save kubeconfig error: %v", err)
 	}
@@ -132,7 +143,7 @@ func fetchCloudEnv(ctx context.Context, w http.ResponseWriter, r *http.Request) 
 	if userCred == nil {
 		return nil, httperrors.NewUnauthorizedError("No token founded")
 	}
-	if !gotypes.IsNil(body) {
+	if !gotypes.IsNil(body) && body.Contains("webconsole") {
 		body, _ = body.Get("webconsole")
 	}
 	s := auth.Client().NewSession(ctx, o.Options.Region, "", "internal", userCred)
@@ -243,6 +254,7 @@ func handleSshShell(ctx context.Context, w http.ResponseWriter, r *http.Request)
 }
 
 func handleSshSession(ctx context.Context, session *session.SSshSession, w http.ResponseWriter) {
+	log.Infof("handleSshSession %s", jsonutils.Marshal(session).String())
 	handleDataSession(ctx, session, w, "ws", nil, false)
 }
 
@@ -278,7 +290,7 @@ func handleClimcShell(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		httperrors.GeneralServerError(ctx, w, err)
 		return
 	}
-	info := command.ClimcSshInfo{}
+	info := webconsole_api.ClimcSshInfo{}
 	err = env.Body.Unmarshal(&info)
 	if err != nil {
 		httperrors.GeneralServerError(ctx, w, err)
@@ -310,7 +322,7 @@ func handleServerRemoteConsole(ctx context.Context, w http.ResponseWriter, r *ht
 		session.VMRC, session.ZSTACK, session.CTYUN,
 		session.HUAWEI, session.HCS, session.APSARA,
 		session.JDCLOUD, session.CLOUDPODS, session.PROXMOX,
-		session.VOLCENGINE:
+		session.VOLCENGINE, session.BAIDU, session.CNWARE, session.KSYUN:
 		responsePublicCloudConsole(ctx, info, w)
 	case session.VNC:
 		handleDataSession(ctx, info, w, "no-vnc", url.Values{"password": {info.GetPassword()}}, true)
@@ -336,7 +348,7 @@ func handleServerRemoteRDPConsole(ctx context.Context, w http.ResponseWriter, r 
 		httperrors.GeneralServerError(ctx, w, err)
 		return
 	}
-	handleDataSession(ctx, info, w, "rdp", url.Values{"password": {info.GetPassword()}}, true)
+	handleDataSession(ctx, info, w, "rdp", url.Values{"password": {info.GetPassword()}}, false)
 }
 
 func responsePublicCloudConsole(ctx context.Context, info *session.RemoteConsoleInfo, w http.ResponseWriter) {
@@ -370,8 +382,13 @@ func handleDataSession(ctx context.Context, sData session.ISessionData, w http.R
 
 	var accessUrl string
 	{
+		connParams, err := seclib2.AES_256.CbcEncodeBase64([]byte(params), []byte(agapi.DefaultEncryptKey))
+		if err != nil {
+			httperrors.GeneralServerError(ctx, w, err)
+			return
+		}
 		dataVal := url.Values{}
-		dataVal.Add("data", base64.StdEncoding.EncodeToString([]byte(params)))
+		dataVal.Add("data", connParams)
 		accessUrl = httputils.JoinPath(o.Options.ApiServer, fmt.Sprintf("web-console/%s?%s", base, dataVal.Encode()))
 	}
 
@@ -397,4 +414,93 @@ func sendJSON(w http.ResponseWriter, body jsonutils.JSONObject) {
 		ret.Add(body, "webconsole")
 	}
 	appsrv.SendJSON(w, ret)
+}
+
+func handleAdbShell(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	env, err := fetchCloudEnv(ctx, w, r)
+	if err != nil {
+		httperrors.GeneralServerError(ctx, w, err)
+		return
+	}
+	serverId := env.Params["<id>"]
+	serverDetails := compute_api.ServerDetails{}
+	resp, err := modules.Servers.GetById(env.ClientSessin, serverId, nil)
+	if err != nil {
+		httperrors.GeneralServerError(ctx, w, err)
+		return
+	}
+	err = resp.Unmarshal(&serverDetails)
+	if err != nil {
+		httperrors.GeneralServerError(ctx, w, err)
+		return
+	}
+
+	phoneIp := ""
+	adbPort := -1
+	connStr, _ := env.Body.GetString("conn")
+	if len(connStr) > 0 {
+		parts := strings.Split(connStr, ":")
+		if len(parts) > 0 {
+			phoneIp = parts[0]
+			if len(parts) > 1 {
+				adbPort, _ = strconv.Atoi(parts[1])
+			}
+			if adbPort == 0 {
+				adbPort = 5555
+			}
+		}
+	}
+	if len(phoneIp) == 0 {
+		// fallback
+		if len(serverDetails.Nics) > 0 {
+			phoneIp = serverDetails.Nics[0].IpAddr
+			portMaps := serverDetails.Nics[0].PortMappings
+			for i := range portMaps {
+				portMap := portMaps[i]
+				if portMap.Port == 5555 && portMap.Protocol == "tcp" {
+					adbPort = *portMap.HostPort
+					break
+				}
+			}
+			var errMsgs []string
+			if !regutils.MatchIP4Addr(phoneIp) {
+				errMsgs = append(errMsgs, "invalid phone IP")
+			}
+			if adbPort < 0 {
+				errMsgs = append(errMsgs, "adb port not found")
+			}
+			if len(errMsgs) > 0 {
+				httperrors.GeneralServerError(ctx, w, httperrors.NewNotSupportedError("%s", strings.Join(errMsgs, ";")))
+				return
+			}
+		} else {
+			httperrors.GeneralServerError(ctx, w, httperrors.NewNotSupportedError("porting_mapping not supported"))
+			return
+		}
+		{
+			// test phoneIP is accessible
+			err := netutils2.TestTcpPort(phoneIp, 5555, 3, 3)
+			if err != nil {
+				log.Errorf("TestTcpPort %s:%d fail %s", phoneIp, 5555, err)
+				phoneIp = serverDetails.HostEIP
+				if len(phoneIp) == 0 {
+					phoneIp = serverDetails.HostAccessIp
+				}
+			} else {
+				adbPort = 5555
+			}
+		}
+	}
+
+	info := command.SAdbShellInfo{
+		HostIp:   phoneIp,
+		HostPort: adbPort,
+	}
+
+	cmd, err := command.NewAdbShellCommand(&info, env.ClientSessin)
+	if err != nil {
+		httperrors.GeneralServerError(ctx, w, err)
+		return
+	}
+	handleCommandSession(ctx, cmd, w)
 }

@@ -27,6 +27,7 @@ import (
 	"yunion.io/x/pkg/util/secrules"
 	"yunion.io/x/sqlchemy"
 
+	"yunion.io/x/onecloud/pkg/apis"
 	billing_api "yunion.io/x/onecloud/pkg/apis/billing"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
@@ -328,6 +329,28 @@ func (self *SGoogleRegionDriver) GetSecurityGroupFilter(vpc *models.SVpc) (func(
 	}, nil
 }
 
+func (self *SGoogleRegionDriver) RequestPrepareSecurityGroups(
+	ctx context.Context,
+	userCred mcclient.TokenCredential,
+	ownerId mcclient.IIdentityProvider,
+	secgroups []models.SSecurityGroup,
+	vpc *models.SVpc,
+	callback func(ids []string) error,
+	task taskman.ITask,
+) error {
+	// 共享vpc不支持创建安全组
+	if strings.HasPrefix(vpc.ExternalId, "projects/") {
+		if callback != nil {
+			err := callback([]string{})
+			if err != nil {
+				return errors.Wrapf(err, "callback")
+			}
+		}
+		return task.ScheduleRun(nil)
+	}
+	return self.SManagedVirtualizationRegionDriver.RequestPrepareSecurityGroups(ctx, userCred, ownerId, secgroups, vpc, callback, task)
+}
+
 func (self *SGoogleRegionDriver) CreateDefaultSecurityGroup(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
@@ -339,7 +362,8 @@ func (self *SGoogleRegionDriver) CreateDefaultSecurityGroup(
 	newGroup.Name = fmt.Sprintf("default-auto-%d", time.Now().Unix())
 	newGroup.Description = "auto generage"
 	newGroup.ManagerId = vpc.ManagerId
-	newGroup.DomainId = ownerId.GetDomainId()
+	newGroup.DomainId = ownerId.GetProjectDomainId()
+	newGroup.ProjectSrc = string(apis.OWNER_SOURCE_LOCAL)
 	newGroup.GlobalvpcId = vpc.GlobalvpcId
 	newGroup.ProjectId = ownerId.GetProjectId()
 	err := models.SecurityGroupManager.TableSpec().Insert(ctx, newGroup)

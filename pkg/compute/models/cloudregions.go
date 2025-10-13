@@ -37,6 +37,7 @@ import (
 	"yunion.io/x/onecloud/pkg/compute/options"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
+	"yunion.io/x/onecloud/pkg/mcclient/auth"
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 	"yunion.io/x/onecloud/pkg/util/yunionmeta"
 )
@@ -155,11 +156,12 @@ func (self *SCloudregion) GetZoneBySuffix(suffix string) (*SZone, error) {
 	if err != nil {
 		return nil, err
 	}
+	msg := suffix
 	if count == 0 {
-		return nil, errors.Wrapf(cloudprovider.ErrNotFound, suffix)
+		return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", msg)
 	}
 	if count > 1 {
-		return nil, errors.Wrapf(cloudprovider.ErrDuplicateId, suffix)
+		return nil, errors.Wrapf(cloudprovider.ErrDuplicateId, "%s", msg)
 	}
 	zone := &SZone{}
 	zone.SetModelManager(ZoneManager, zone)
@@ -548,9 +550,13 @@ func (manager *SCloudregionManager) SyncRegions(
 		if err != nil {
 			syncResult.UpdateError(err)
 		} else {
-			cpr := CloudproviderRegionManager.FetchByIdsOrCreate(cloudProvider.Id, commondb[i].Id)
-			cpr.setCapabilities(ctx, userCred, commonext[i].GetCapabilities())
-			cloudProviderRegions = append(cloudProviderRegions, *cpr)
+			cpr, err := CloudproviderRegionManager.FetchByIdsOrCreate(cloudProvider.Id, commondb[i].Id)
+			if err != nil {
+				syncResult.UpdateError(err)
+			} else {
+				cpr.setCapabilities(ctx, userCred, commonext[i].GetCapabilities())
+				cloudProviderRegions = append(cloudProviderRegions, *cpr)
+			}
 			localRegions = append(localRegions, commondb[i])
 			remoteRegions = append(remoteRegions, commonext[i])
 			syncResult.Update()
@@ -561,9 +567,13 @@ func (manager *SCloudregionManager) SyncRegions(
 		if err != nil {
 			syncResult.AddError(err)
 		} else {
-			cpr := CloudproviderRegionManager.FetchByIdsOrCreate(cloudProvider.Id, new.Id)
-			cpr.setCapabilities(ctx, userCred, added[i].GetCapabilities())
-			cloudProviderRegions = append(cloudProviderRegions, *cpr)
+			cpr, err := CloudproviderRegionManager.FetchByIdsOrCreate(cloudProvider.Id, new.Id)
+			if err != nil {
+				syncResult.AddError(err)
+			} else {
+				cpr.setCapabilities(ctx, userCred, added[i].GetCapabilities())
+				cloudProviderRegions = append(cloudProviderRegions, *cpr)
+			}
 			localRegions = append(localRegions, *new)
 			remoteRegions = append(remoteRegions, added[i])
 			syncResult.Add()
@@ -701,6 +711,7 @@ func (manager *SCloudregionManager) InitializeData() error {
 			defRegion.Description = "Default Region"
 			defRegion.Status = api.CLOUD_REGION_STATUS_INSERVER
 			defRegion.Provider = api.CLOUD_PROVIDER_ONECLOUD
+			defRegion.SetModelManager(manager, &defRegion)
 			err := manager.TableSpec().Insert(context.TODO(), &defRegion)
 			if err != nil {
 				return errors.Wrap(err, "insert default region")
@@ -1256,7 +1267,8 @@ func (self *SCloudregion) newCloudimage(ctx context.Context, userCred mcclient.T
 		}
 
 		image.IsPublic = true
-		image.ProjectId = "system"
+		s := auth.GetAdminSession(ctx, options.Options.Region)
+		image.ProjectId = s.GetProjectId()
 		err = CachedimageManager.TableSpec().Insert(ctx, image)
 		if err != nil {
 			return errors.Wrapf(err, "Insert cachedimage")

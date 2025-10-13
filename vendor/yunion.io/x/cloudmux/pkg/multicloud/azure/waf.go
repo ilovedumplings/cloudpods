@@ -56,6 +56,10 @@ func (self *CustomRule) GetName() string {
 	return self.Name
 }
 
+func (self *CustomRule) GetType() string {
+	return api.WAF_RULE_TYPE_CUSTOM
+}
+
 func (self *CustomRule) GetGlobalId() string {
 	return fmt.Sprintf("%s-%s", self.waf.GetGlobalId(), self.GetName())
 }
@@ -259,6 +263,26 @@ func (self *CustomRule) GetStatementCondition() cloudprovider.TWafStatementCondi
 	return cloudprovider.WafStatementConditionAnd
 }
 
+func (self *CustomRule) GetExpression() string {
+	return ""
+}
+
+func (self *CustomRule) GetEnabled() bool {
+	return true
+}
+
+func (self *CustomRule) Enable() error {
+	return cloudprovider.ErrNotImplemented
+}
+
+func (self *CustomRule) Disable() error {
+	return cloudprovider.ErrNotImplemented
+}
+
+func (self *CustomRule) GetConfig() (jsonutils.JSONObject, error) {
+	return jsonutils.NewDict(), nil
+}
+
 func (self *CustomRule) GetStatements() ([]cloudprovider.SWafStatement, error) {
 	ret := []cloudprovider.SWafStatement{}
 	for _, condition := range self.Matchconditions {
@@ -322,6 +346,10 @@ type ManagedRules struct {
 	Managedrulesets []ManagedRule `json:"managedRuleSets"`
 }
 
+func (self *ManagedRules) GetType() string {
+	return api.WAF_RULE_TYPE_TEMPLATE
+}
+
 func (self *ManagedRules) GetName() string {
 	return fmt.Sprintf("%s Managed rules", self.waf.GetName())
 }
@@ -372,6 +400,26 @@ func (self *ManagedRules) Update(opts *cloudprovider.SWafRule) error {
 
 func (self *ManagedRules) GetStatementCondition() cloudprovider.TWafStatementCondition {
 	return cloudprovider.WafStatementConditionAnd
+}
+
+func (self *ManagedRules) GetExpression() string {
+	return ""
+}
+
+func (self *ManagedRules) GetEnabled() bool {
+	return true
+}
+
+func (self *ManagedRules) Enable() error {
+	return cloudprovider.ErrNotImplemented
+}
+
+func (self *ManagedRules) Disable() error {
+	return cloudprovider.ErrNotImplemented
+}
+
+func (self *ManagedRules) GetConfig() (jsonutils.JSONObject, error) {
+	return jsonutils.NewDict(), nil
 }
 
 func (self *ManagedRules) GetStatements() ([]cloudprovider.SWafStatement, error) {
@@ -440,6 +488,50 @@ func (self *SAppGatewayWaf) Delete() error {
 
 func (self *SAppGatewayWaf) GetWafType() cloudprovider.TWafType {
 	return cloudprovider.WafTypeAppGateway
+}
+
+func (self *SAppGatewayWaf) GetIsAccessProduct() bool {
+	return true
+}
+
+func (self *SAppGatewayWaf) GetAccessHeaders() []string {
+	return []string{}
+}
+
+func (self *SAppGatewayWaf) GetHttpPorts() []int {
+	return []int{}
+}
+
+func (self *SAppGatewayWaf) GetHttpsPorts() []int {
+	return []int{}
+}
+
+func (self *SAppGatewayWaf) GetCname() string {
+	return ""
+}
+
+func (self *SAppGatewayWaf) GetUpstreamScheme() string {
+	return ""
+}
+
+func (self *SAppGatewayWaf) GetCertId() string {
+	return ""
+}
+
+func (self *SAppGatewayWaf) GetCertName() string {
+	return ""
+}
+
+func (self *SAppGatewayWaf) GetUpstreamPort() int {
+	return 0
+}
+
+func (self *SAppGatewayWaf) GetSourceIps() []string {
+	return []string{}
+}
+
+func (self *SAppGatewayWaf) GetCcList() []string {
+	return []string{}
 }
 
 func (self *SAppGatewayWaf) AddRule(opts *cloudprovider.SWafRule) (cloudprovider.ICloudWafRule, error) {
@@ -537,7 +629,7 @@ func (self *SRegion) GetICloudWafInstanceById(id string) (cloudprovider.ICloudWa
 	if strings.Contains(id, "microsoft.network/applicationgatewaywebapplicationfirewallpolicies") {
 		return self.GetAppGatewayWaf(id)
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotSupported, id)
+	return nil, errors.Wrapf(cloudprovider.ErrNotSupported, "%s", id)
 }
 
 func (self *SRegion) CreateAppWafInstance(name string, action *cloudprovider.DefaultAction) (*SAppGatewayWaf, error) {

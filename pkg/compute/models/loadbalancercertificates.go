@@ -44,6 +44,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=loadbalancercertificate
+// +onecloud:swagger-gen-model-plural=loadbalancercertificates
 type SLoadbalancerCertificateManager struct {
 	SLoadbalancerLogSkipper
 	db.SSharableVirtualResourceBaseManager
@@ -290,6 +292,15 @@ func (man *SLoadbalancerCertificateManager) QueryDistinctExtraField(q *sqlchemy.
 		return q, nil
 	}
 
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SLoadbalancerCertificateManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
+	}
 	return q, httperrors.ErrNotFound
 }
 

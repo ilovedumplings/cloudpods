@@ -17,6 +17,7 @@ package agent
 import (
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"yunion.io/x/jsonutils"
@@ -82,7 +83,14 @@ func (agent *SBaseAgent) GetListenIPs() []net.IP {
 func (agent *SBaseAgent) FindListenIP(listenAddr string) (net.IP, error) {
 	ips := agent.GetListenIPs()
 	if listenAddr == "" {
-		return ips[0], nil
+		for i := range ips {
+			ipstr := ips[i].String()
+			if strings.HasPrefix(ipstr, netutils2.SECRET_PREFIX) {
+				continue
+			}
+			return ips[i], nil
+		}
+		return nil, fmt.Errorf("Not Address on Interface %#v", agent.ListenInterface)
 	}
 	if listenAddr == "0.0.0.0" {
 		return net.ParseIP(listenAddr), nil
@@ -276,7 +284,7 @@ func (agent *SBaseAgent) createOrUpdateBaremetalAgent(session *mcclient.ClientSe
 			return errors.Error("agent not support storagecache_id, region might not be up-to-date")
 		}
 	}
-	agent.CacheManager = storageman.NewLocalImageCacheManager(agent.IAgent(), agent.CachePath, storageCacheId)
+	agent.CacheManager = storageman.NewLocalImageCacheManager(agent.IAgent(), agent.CachePath, storageCacheId, nil)
 
 	return nil
 }
@@ -286,6 +294,9 @@ func (agent *SBaseAgent) GetManagerUri() string {
 	proto := "http"
 	if agent.IAgent().GetEnableSsl() {
 		proto = "https"
+	}
+	if accessIP.To4() == nil { // ipv6 addr
+		return fmt.Sprintf("%s://[%s]:%d", proto, accessIP, agent.IAgent().GetPort())
 	}
 	return fmt.Sprintf("%s://%s:%d", proto, accessIP, agent.IAgent().GetPort())
 }

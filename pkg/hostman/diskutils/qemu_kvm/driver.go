@@ -41,7 +41,7 @@ import (
 	"yunion.io/x/onecloud/pkg/util/sysutils"
 )
 
-var BASE_SSH_PORT = 22222
+var BASE_SSH_PORT = 28000
 
 var (
 	QEMU_KVM_PATH = "/usr/libexec/qemu-kvm"
@@ -66,6 +66,7 @@ type QemuDeployManager struct {
 	hugepage        bool
 	hugepageSizeKB  int
 	portsInUse      *sync.Map
+	sshPortLock     *sync.Mutex
 	lastUsedSshPort int
 	qemuCmd         string
 	memSizeMb       int
@@ -152,9 +153,11 @@ func (m *QemuDeployManager) unsetPort(port int) {
 }
 
 func (m *QemuDeployManager) GetSshFreePort() int {
+	m.sshPortLock.Lock()
+	defer m.sshPortLock.Unlock()
 	port := m.GetFreePortByBase(BASE_SSH_PORT + m.lastUsedSshPort)
 	m.lastUsedSshPort = port - BASE_SSH_PORT
-	if m.lastUsedSshPort > 10000 {
+	if m.lastUsedSshPort >= 2000 {
 		m.lastUsedSshPort = 0
 	}
 	return port
@@ -230,6 +233,7 @@ func InitQemuDeployManager(
 			hugepageSizeKB: hugepageSizeKB,
 			memSizeMb:      memSizeMb,
 			portsInUse:     new(sync.Map),
+			sshPortLock:    new(sync.Mutex),
 			c:              make(chan struct{}, deployConcurrent),
 			qemuCmd:        qemuCmd,
 		}
@@ -267,6 +271,7 @@ type QemuKvmDriver struct {
 
 	partitions    []fsdriver.IDiskPartition
 	lvmPartitions []fsdriver.IDiskPartition
+	diskId        string
 }
 
 func NewQemuKvmDriver(imageInfo qemuimg.SImageInfo) *QemuKvmDriver {
@@ -275,10 +280,10 @@ func NewQemuKvmDriver(imageInfo qemuimg.SImageInfo) *QemuKvmDriver {
 	}
 }
 
-func (d *QemuKvmDriver) Connect(guestDesc *apis.GuestDesc) error {
+func (d *QemuKvmDriver) Connect(desc *apis.GuestDesc, diskId string) error {
 	manager.Acquire()
 	d.qemuArchDriver = NewCpuArchDriver(manager.cpuArch)
-	err := d.connect(guestDesc)
+	err := d.connect(desc, diskId)
 	if err != nil {
 		d.qemuArchDriver.CleanGuest()
 		return err
@@ -287,25 +292,31 @@ func (d *QemuKvmDriver) Connect(guestDesc *apis.GuestDesc) error {
 	return nil
 }
 
-func (d *QemuKvmDriver) connect(guestDesc *apis.GuestDesc) error {
+func (d *QemuKvmDriver) connect(guestDesc *apis.GuestDesc, diskId string) error {
 	var (
 		ncpu      = 2
 		memSizeMB = manager.getMemSizeMb()
 		disks     = make([]string, 0)
+		diskIds   = make([]string, 0)
 	)
 
 	var sshport = manager.GetSshFreePort()
 	defer manager.unsetPort(sshport)
 
-	//if guestDesc != nil {
-	//	for i := range guestDesc.Disks {
-	//		disks = append(disks, guestDesc.Disks[i].Path)
-	//	}
-	//} else {
-	disks = append(disks, d.imageInfo.Path)
-	//}
+	if guestDesc != nil && len(guestDesc.Disks) > 0 {
+		for i := range guestDesc.Disks {
+			disks = append(disks, guestDesc.Disks[i].Path)
+			diskIds = append(diskIds, guestDesc.Disks[i].DiskId)
+		}
+	} else {
+		if diskId == "" {
+			diskId = "single-disk"
+		}
+		disks = append(disks, d.imageInfo.Path)
+		diskIds = append(diskIds, diskId)
+	}
 
-	err := d.qemuArchDriver.StartGuest(sshport, ncpu, memSizeMB, manager.hugepage, manager.hugepageSizeKB, d.imageInfo)
+	err := d.qemuArchDriver.StartGuest(sshport, ncpu, memSizeMB, manager.hugepage, manager.hugepageSizeKB, d.imageInfo, disks, diskIds)
 	if err != nil {
 		return err
 	}
@@ -353,11 +364,11 @@ func (d *QemuKvmDriver) IsLVMPartition() bool {
 
 func (d *QemuKvmDriver) Zerofree() {}
 
-func (d *QemuKvmDriver) ResizePartition() error {
+func (d *QemuKvmDriver) ResizePartition(string, string) error {
 	return nil
 }
 
-func (d *QemuKvmDriver) FormatPartition(fs, uuid string) error {
+func (d *QemuKvmDriver) FormatPartition(fs, uuid string, features *apis.FsFeatures) error {
 	return nil
 }
 
@@ -366,6 +377,10 @@ func (d *QemuKvmDriver) MakePartition(fs string) error {
 }
 
 func (d *QemuKvmDriver) DetectIsUEFISupport(rootfs fsdriver.IRootFsDriver) bool {
+	return false
+}
+
+func (d *QemuKvmDriver) DetectIsBIOSSupport(rootfs fsdriver.IRootFsDriver) bool {
 	return false
 }
 
@@ -420,7 +435,7 @@ func (d *QemuKvmDriver) DeployGuestfs(req *apis.DeployParams) (*apis.DeployGuest
 	log.Infof("deploy error str %v", errStrs)
 	var retErr error = nil
 	if len(errStrs[0]) > 0 {
-		retErr = errors.Errorf(errStrs[0])
+		retErr = errors.Errorf("%s", errStrs[0])
 	}
 
 	responseStrs, err := d.sshRun("test -f /response && cat /response || true")
@@ -439,13 +454,14 @@ func (d *QemuKvmDriver) DeployGuestfs(req *apis.DeployParams) (*apis.DeployGuest
 	return res, retErr
 }
 
-func (d *QemuKvmDriver) ResizeFs() (*apis.Empty, error) {
+func (d *QemuKvmDriver) ResizeFs(req *apis.ResizeFsParams) (*apis.Empty, error) {
 	defer func() {
 		logStr, _ := d.sshRun("test -f /log && cat /log")
 		log.Infof("ResizeFs log: %v", strings.Join(logStr, "\n"))
 	}()
 
-	cmd := fmt.Sprintf("%s --deploy-action resize_fs", DEPLOYER_BIN)
+	params, _ := json.Marshal(req)
+	cmd := fmt.Sprintf("%s --deploy-action resize_fs --deploy-params '%s'", DEPLOYER_BIN, params)
 	out, err := d.sshRun(cmd)
 	if err != nil {
 		return nil, errors.Wrapf(err, "run resize_fs failed %s", out)
@@ -458,7 +474,7 @@ func (d *QemuKvmDriver) ResizeFs() (*apis.Empty, error) {
 	}
 	var retErr error = nil
 	if len(errStrs[0]) > 0 {
-		retErr = errors.Errorf(errStrs[0])
+		retErr = errors.Errorf("%s", errStrs[0])
 	}
 	return new(apis.Empty), retErr
 }
@@ -483,7 +499,7 @@ func (d *QemuKvmDriver) FormatFs(req *apis.FormatFsParams) (*apis.Empty, error) 
 	}
 	var retErr error = nil
 	if len(errStrs[0]) > 0 {
-		retErr = errors.Errorf(errStrs[0])
+		retErr = errors.Errorf("%s", errStrs[0])
 	}
 	return new(apis.Empty), retErr
 }
@@ -520,7 +536,7 @@ func (d *QemuKvmDriver) SaveToGlance(req *apis.SaveToGlanceParams) (*apis.SaveTo
 	}
 	var retErr error = nil
 	if len(errStrs[0]) > 0 {
-		retErr = errors.Errorf(errStrs[0])
+		retErr = errors.Errorf("%s", errStrs[0])
 	}
 	return res, retErr
 }
@@ -557,7 +573,7 @@ func (d *QemuKvmDriver) ProbeImageInfo(req *apis.ProbeImageInfoPramas) (*apis.Im
 	}
 	var retErr error = nil
 	if len(errStrs[0]) > 0 {
-		retErr = errors.Errorf(errStrs[0])
+		retErr = errors.Errorf("%s", errStrs[0])
 	}
 	return res, retErr
 }
@@ -605,14 +621,22 @@ func (d *QemuBaseDriver) CleanGuest() {
 }
 
 func (d *QemuBaseDriver) startCmds(
-	sshPort, ncpu, memSizeMB int, imageInfo qemuimg.SImageInfo,
+	sshPort, ncpu, memSizeMB int, imageInfo qemuimg.SImageInfo, disksPath, diskIds []string,
 	machineOpts, cdromDeviceOpts, fwOpts, socketPath, initrdPath, kernelPath string,
 ) string {
 	cmd := manager.qemuCmd
 
 	if sysutils.IsKvmSupport() {
 		cmd += __("-enable-kvm")
-		cmd += __("-cpu host")
+		isCPUIntel := sysutils.IsProcessorIntel()
+		isCPUAMD := sysutils.IsProcessorAmd()
+		if isCPUIntel {
+			cmd += __("-cpu host,vendor=GenuineIntel")
+		} else if isCPUAMD {
+			cmd += __("-cpu host,vendor=AuthenticAMD")
+		} else {
+			cmd += __("-cpu host")
+		}
 	} else {
 		cmd += __("-cpu max")
 	}
@@ -631,7 +655,7 @@ func (d *QemuBaseDriver) startCmds(
 	cmd += __("-append vsyscall=emulate")
 	cmd += fwOpts
 	cmd += __("-device virtio-serial-pci")
-	cmd += __("-netdev user,id=hostnet0,hostfwd=tcp::%d-:22", sshPort)
+	cmd += __("-netdev user,id=hostnet0,hostfwd=tcp:127.0.0.1:%d-:22", sshPort)
 	cmd += __("-device virtio-net-pci,netdev=hostnet0")
 	cmd += __("-device virtio-scsi-pci,id=scsi")
 
@@ -640,14 +664,17 @@ func (d *QemuBaseDriver) startCmds(
 
 		cmd += __("-object %s", imageInfo.SecretOptions())
 	}
-	for i, diskPath := range []string{imageInfo.Path} {
-		diskDrive := __("-drive file=%s,if=none,id=drive_%d,cache=none", diskPath, i)
+	if len(disksPath) == 0 {
+		disksPath = []string{imageInfo.Path}
+	}
+	for i, diskPath := range disksPath {
+		diskDrive := __("-drive file=%s,if=none,id=drive_%d,cache=none", strings.ReplaceAll(diskPath, "\\", "\\\\"), i)
 		if imageInfo.Format != qemuimgfmt.RAW && imageInfo.Encrypted() {
 			diskDrive += ",encrypt.format=luks,encrypt.key-secret=sec0"
 		}
 
 		cmd += diskDrive
-		cmd += __("-device scsi-hd,drive=drive_%d,bus=scsi.0,id=drive_%d", i, i)
+		cmd += __("-device scsi-hd,drive=drive_%d,bus=scsi.0,id=drive_%d,serial=%s", i, i, strings.ReplaceAll(diskIds[i], "-", ""))
 	}
 	cmd += __("-drive id=cd0,if=none,media=cdrom,file=%s", DEPLOY_ISO)
 	cmd += cdromDeviceOpts
@@ -659,7 +686,7 @@ type QemuX86Driver struct {
 	QemuBaseDriver
 }
 
-func (d *QemuX86Driver) StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, pageSizeKB int, imageInfo qemuimg.SImageInfo) error {
+func (d *QemuX86Driver) StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, pageSizeKB int, imageInfo qemuimg.SImageInfo, disksPath, diskIds []string) error {
 	uuid := stringutils.UUID4()
 	socketPath := fmt.Sprintf("/opt/cloud/host-deployer/hmp_%s.socket", uuid)
 	d.pidPath = fmt.Sprintf("/opt/cloud/host-deployer/%s.pid", uuid)
@@ -671,6 +698,8 @@ func (d *QemuX86Driver) StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, 
 		ncpu,
 		memSizeMB,
 		imageInfo,
+		disksPath,
+		diskIds,
 		machineOpts,
 		cdromDeviceOpts,
 		"",
@@ -713,7 +742,7 @@ type QemuARMDriver struct {
 	QemuBaseDriver
 }
 
-func (d *QemuARMDriver) StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, pageSizeKB int, imageInfo qemuimg.SImageInfo) error {
+func (d *QemuARMDriver) StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, pageSizeKB int, imageInfo qemuimg.SImageInfo, disksPath, diskIds []string) error {
 	uuid := stringutils.UUID4()
 	socketPath := fmt.Sprintf("/opt/cloud/host-deployer/hmp_%s.socket", uuid)
 	d.pidPath = fmt.Sprintf("/opt/cloud/host-deployer/%s.pid", uuid)
@@ -732,6 +761,8 @@ func (d *QemuARMDriver) StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, 
 		ncpu,
 		memSizeMB,
 		imageInfo,
+		disksPath,
+		diskIds,
 		machineOpts,
 		cdromDeviceOpts,
 		fwOpts,
@@ -771,7 +802,7 @@ func (d *QemuARMDriver) StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, 
 }
 
 type IQemuArchDriver interface {
-	StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, pageSizeKB int, imageInfo qemuimg.SImageInfo) error
+	StartGuest(sshPort, ncpu, memSizeMB int, hugePage bool, pageSizeKB int, imageInfo qemuimg.SImageInfo, disksPath, diskIds []string) error
 	CleanGuest()
 }
 

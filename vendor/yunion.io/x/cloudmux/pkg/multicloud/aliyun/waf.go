@@ -59,3 +59,29 @@ func (self *SRegion) DeleteInstance(id string) error {
 	_, err := self.wafRequest("DeleteInstance", params)
 	return errors.Wrapf(err, "DeleteInstance")
 }
+
+func (self *SRegion) GetICloudWafInstancesV1() ([]cloudprovider.ICloudWafInstance, error) {
+	ins, err := self.DescribeInstanceSpecInfo()
+	if err != nil {
+		if errors.Cause(err) == cloudprovider.ErrNotFound {
+			return []cloudprovider.ICloudWafInstance{}, nil
+		}
+		return nil, errors.Wrapf(err, "DescribeInstanceSpecInfo")
+	}
+	domains, err := self.DescribeDomainNames(ins.InstanceId)
+	if err != nil {
+		return nil, errors.Wrapf(err, "DescribeDomainNames")
+	}
+	ret := []cloudprovider.ICloudWafInstance{}
+	for i := range domains {
+		domain, err := self.DescribeDomain(ins.InstanceId, domains[i])
+		if err != nil {
+			return nil, errors.Wrapf(err, "DescribeDomain %s", domains[i])
+		}
+		domain.region = self
+		domain.insId = ins.InstanceId
+		domain.name = domains[i]
+		ret = append(ret, domain)
+	}
+	return ret, nil
+}

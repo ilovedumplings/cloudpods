@@ -74,7 +74,7 @@ func NewLibguestfsDriver(imageInfo qemuimg.SImageInfo) *SLibguestfsDriver {
 	}
 }
 
-func (d *SLibguestfsDriver) Connect(*apis.GuestDesc) error {
+func (d *SLibguestfsDriver) Connect(*apis.GuestDesc, string) error {
 	fish, err := guestfsManager.AcquireFish()
 	if err != nil {
 		return err
@@ -209,16 +209,16 @@ func (d *SLibguestfsDriver) Zerofree() {
 		len(d.parts), time.Now().Sub(startTime).Seconds())
 }
 
-func (d *SLibguestfsDriver) ResizePartition() error {
+func (d *SLibguestfsDriver) ResizePartition(string, string) error {
 	if d.IsLVMPartition() {
 		// do not try to resize LVM partition
 		return nil
 	}
-	return fsutils.ResizeDiskFs(d.nbddev, 0)
+	return fsutils.ResizeDiskFs(d.nbddev, 0, false)
 }
 
-func (d *SLibguestfsDriver) FormatPartition(fs, uuid string) error {
-	return fsutils.FormatPartition(fmt.Sprintf("%sp1", d.nbddev), fs, uuid)
+func (d *SLibguestfsDriver) FormatPartition(fs, uuid string, features *apis.FsFeatures) error {
+	return fsutils.FormatPartition(fmt.Sprintf("%sp1", d.nbddev), fs, uuid, features)
 }
 
 func (d *SLibguestfsDriver) MakePartition(fsFormat string) error {
@@ -256,6 +256,10 @@ func (d *SLibguestfsDriver) DetectIsUEFISupport(rootfs fsdriver.IRootFsDriver) b
 	return fsutils.DetectIsUEFISupport(rootfs, d.GetPartitions())
 }
 
+func (d *SLibguestfsDriver) DetectIsBIOSSupport(rootfs fsdriver.IRootFsDriver) bool {
+	return fsutils.DetectIsBIOSSupport(d.nbddev, rootfs)
+}
+
 func (d *SLibguestfsDriver) MountRootfs(readonly bool) (fsdriver.IRootFsDriver, error) {
 	return fsutils.MountRootfs(readonly, d.GetPartitions())
 }
@@ -271,8 +275,8 @@ func (d *SLibguestfsDriver) DeployGuestfs(req *apis.DeployParams) (res *apis.Dep
 	return fsutils.DeployGuestfs(d, req)
 }
 
-func (d *SLibguestfsDriver) ResizeFs() (*apis.Empty, error) {
-	return fsutils.ResizeFs(d)
+func (d *SLibguestfsDriver) ResizeFs(*apis.ResizeFsParams) (*apis.Empty, error) {
+	return fsutils.ResizeFs(d, "")
 }
 
 func (d *SLibguestfsDriver) SaveToGlance(req *apis.SaveToGlanceParams) (*apis.SaveToGlanceResponse, error) {

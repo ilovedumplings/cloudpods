@@ -64,10 +64,6 @@ func (m *SEsxiRootFs) DeployHostname(part IDiskPartition, hostname, domain strin
 	return nil
 }
 
-func (m *SEsxiRootFs) DeployQgaBlackList(part IDiskPartition) error {
-	return nil
-}
-
 func (m *SEsxiRootFs) DeployHosts(part IDiskPartition, hn, domain string, ips []string) error {
 	return nil
 }
@@ -93,5 +89,9 @@ func (m *SEsxiRootFs) PrepareFsForTemplate(IDiskPartition) error {
 }
 
 func (m *SEsxiRootFs) DeployNetworkingScripts(rootfs IDiskPartition, nics []*types.SServerNic) error {
+	return nil
+}
+
+func (d *SEsxiRootFs) ConfigSshd(loginAccount, loginPassword string, sshPort int) error {
 	return nil
 }

@@ -1,4 +1,4 @@
-FROM registry.cn-beijing.aliyuncs.com/yunionio/kubectl:1.18.6
+FROM registry.cn-beijing.aliyuncs.com/yunionio/kubectl:1.22.9
 
 MAINTAINER "Zexi Li <lizexi@yunionyun.com>"
 
@@ -6,5 +6,5 @@ ENV TZ UTC
 
 RUN mkdir -p /opt/yunion/bin
 
-RUN apk add --no-cache sshpass ipmitool openssh-client tzdata ca-certificates && \
+RUN apk add --no-cache sshpass ipmitool openssh-client tzdata ca-certificates bash && \
     rm -rf /var/cache/apk/*

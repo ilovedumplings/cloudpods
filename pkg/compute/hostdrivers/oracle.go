@@ -35,3 +35,7 @@ func (self *SOracleHostDriver) GetHostType() string {
 func (self *SOracleHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_ORACLE
 }
+
+func (self *SOracleHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_ORACLE
+}

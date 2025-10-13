@@ -17,18 +17,39 @@ import (
 const UNION_RESULT_NAME = "__union_result__"
 
 const (
-	CALL_TOP = "top"
+	CALL_TOP        = "top"
+	CALL_BOTTOM     = "bottom"
+	CALL_PERCENTILE = "percentile"
+	CALL_SUM        = "sum"
+	CALL_MIN        = "min"
+	CALL_MAX        = "max"
 )
+
+var MUL_ARGS_AGGREGATOR MulArgsAggregator = []string{CALL_TOP, CALL_PERCENTILE, CALL_BOTTOM}
+
+type MulArgsAggregator []string
+
+func (m MulArgsAggregator) Has(aggr string) bool {
+	for _, a := range m {
+		if a == aggr {
+			return true
+		}
+	}
+	return false
+}
 
 type promQL struct {
 	groupByWildcard bool
 	timeRange       *influxql.TimeRange
 	fieldIsWildcard bool
 	measurement     string
+	labelsVisitor   *labelsVisitor
 }
 
 func NewPromQL() Translator {
-	return &promQL{}
+	return &promQL{
+		labelsVisitor: newLabelsVisitor(),
+	}
 }
 
 func (m *promQL) Translate(s influxql.Statement) (string, error) {
@@ -78,7 +99,7 @@ func (m *promQL) translateField(s *influxql.SelectStatement, field *influxql.Fie
 	}
 	m.timeRange = timeRange
 
-	matchers, err := m.getLabels(cond)
+	matchers, err := m.getLabels(m.labelsVisitor, cond)
 	if err != nil {
 		return nil, errors.Wrap(err, "get matchers")
 	}
@@ -245,23 +266,54 @@ func (m promQL) generateExpr(
 
 	result = getAggrExpr(aggrOps, result)
 
-	//fmt.Printf("=====m.GroupByWildcard: %v, %#v\n", m.groupByWildcard, result)
+	//fmt.Printf("=====m.GroupByWildcard: %v, %#v, aggrOps: %#v\n", m.groupByWildcard, result, aggrOps)
 
-	if len(groups) != 0 && !m.groupByWildcard {
-		expr := &promql.AggregateExpr{
-			Op:   promql.ItemAvg,
-			Expr: result,
+	shouldSkipAggr := func(opName string) bool {
+		switch opName {
+		case CALL_PERCENTILE, CALL_TOP, CALL_BOTTOM, "last":
+			return true
 		}
-		if len(groups) != 0 {
-			expr.Grouping = groups
-		}
-		result = expr
+		return false
 	}
+
+	if len(aggrOps) != 0 {
+		op := promql.ItemAvg
+		opName := aggrOps[0].Name
+		if !shouldSkipAggr(opName) {
+			switch opName {
+			case CALL_SUM:
+				op = promql.ItemSum
+			case CALL_MAX:
+				op = promql.ItemMax
+			case CALL_MIN:
+				op = promql.ItemMin
+			}
+			expr := &promql.AggregateExpr{
+				Op:   op,
+				Expr: result,
+			}
+			if len(groups) != 0 {
+				expr.Grouping = groups
+			}
+			if !m.groupByWildcard {
+				result = expr
+			}
+		}
+	}
+
 	return result, nil
 }
 
 func (m promQL) formatExpr(expr promql.Expr) string {
-	return expr.String()
+	initialExpr := expr.String()
+	//fmt.Printf("---replaceLabels: %#v\n", m.labelsVisitor.replaceLabels)
+	//fmt.Printf("--src: %s\n", initialExpr)
+	if len(m.labelsVisitor.replaceLabels) > 0 && len(m.labelsVisitor.labels) > 1 {
+		for src, replace := range m.labelsVisitor.replaceLabels {
+			initialExpr = strings.ReplaceAll(initialExpr, src, replace)
+		}
+	}
+	return initialExpr
 }
 
 func newAggrExpr(name string, argType promql.ValueType, returnType promql.ValueType, restExpr promql.Expr) promql.Expr {
@@ -291,29 +343,27 @@ func getAggrExpr(ops []*AggrOperator, expr promql.Expr) promql.Expr {
 	case "abs":
 		// https://prometheus.io/docs/prometheus/latest/querying/functions/#abs
 		expr = newAggrExpr("abs", promql.ValueTypeVector, promql.ValueTypeVector, restExpr)
-	case "sum":
-		expr = newAggrExpr("sum", promql.ValueTypeVector, promql.ValueTypeVector, restExpr)
 	case "mean":
 		// https://docs.victoriametrics.com/MetricsQL.html#avg_over_time
 		expr = newAggrExpr("avg_over_time", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
 	case "last":
 		// https://docs.victoriametrics.com/MetricsQL.html#last_over_time
 		expr = newAggrExpr("last_over_time", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
-	case "count":
-		// use count, not use 'count_over_time' https://docs.victoriametrics.com/MetricsQL.html#count_over_time
-		expr = newAggrExpr("count", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
 	case "stddev":
 		// https://prometheus.io/docs/prometheus/latest/querying/functions/#aggregation_over_time
 		expr = newAggrExpr("stddev_over_time", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
+	case "count":
+		// use count, not use 'count_over_time' https://docs.victoriametrics.com/MetricsQL.html#count_over_time
+		expr = newAggrExpr("count", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
 	case "median":
 		// https://docs.victoriametrics.com/MetricsQL.html#median_over_time
 		expr = newAggrExpr("median_over_time", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
-	case "max":
+	/*case "max":
 		// https://docs.victoriametrics.com/MetricsQL.html#max_over_time
-		expr = newAggrExpr("max_over_time", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
+		expr = newAggrExpr("max", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
 	case "min":
 		// https://docs.victoriametrics.com/MetricsQL.html#min_over_time
-		expr = newAggrExpr("min_over_time", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
+		expr = newAggrExpr("min", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)*/
 	case "mode":
 		// https://docs.victoriametrics.com/MetricsQL.html#mode_over_time
 		expr = newAggrExpr("mode_over_time", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
@@ -324,6 +374,24 @@ func getAggrExpr(ops []*AggrOperator, expr promql.Expr) promql.Expr {
 		expr = newAggrExpr("distinct", promql.ValueTypeMatrix, promql.ValueTypeVector, restExpr)
 	case CALL_TOP:
 		expr = newAggrExprWithArgs("topk_avg",
+			[]promql.ValueType{
+				promql.ValueTypeString,
+				promql.ValueTypeMatrix,
+			}, promql.ValueTypeVector,
+			promql.Expressions{
+				aggrOp.Args[0],
+				restExpr})
+	case CALL_BOTTOM:
+		expr = newAggrExprWithArgs("bottomk_avg",
+			[]promql.ValueType{
+				promql.ValueTypeString,
+				promql.ValueTypeMatrix,
+			}, promql.ValueTypeVector,
+			promql.Expressions{
+				aggrOp.Args[0],
+				restExpr})
+	case CALL_PERCENTILE:
+		expr = newAggrExprWithArgs("quantile_over_time",
 			[]promql.ValueType{
 				promql.ValueTypeString,
 				promql.ValueTypeMatrix,
@@ -347,18 +415,25 @@ func newAggrOperatorByName(name string) *AggrOperator {
 }
 
 func getAggrOperator(op *influxql.Call) ([]*AggrOperator, error) {
-	if len(op.Args) != 1 && op.Name != CALL_TOP {
+	if len(op.Args) != 1 && !MUL_ARGS_AGGREGATOR.Has(op.Name) {
 		return nil, errors.Errorf("not supported aggregator: %s with args: %#v", op.String(), op.Args)
 	}
 	aggOp := newAggrOperatorByName(op.Name)
-	if op.Name == CALL_TOP {
-		topNumStr := op.Args[len(op.Args)-1].String()
-		topNum, err := strconv.Atoi(topNumStr)
+	if op.Name == CALL_TOP || op.Name == CALL_BOTTOM || op.Name == CALL_PERCENTILE {
+		numStr := op.Args[len(op.Args)-1].String()
+		num, err := strconv.Atoi(numStr)
 		if err != nil {
-			return nil, errors.Wrapf(err, "parse top aggregator: %s", op)
+			return nil, errors.Wrapf(err, "parse top/bottom aggregator: %s", op)
+		}
+		numFloat := float64(num)
+		if op.Name == CALL_PERCENTILE {
+			if numFloat > 100 {
+				return nil, errors.Errorf("percentile %f is large than 100", numFloat)
+			}
+			numFloat = numFloat / 100
 		}
 		aggOp.Args = promql.Expressions{
-			&promql.NumberLiteral{Val: float64(topNum)},
+			&promql.NumberLiteral{Val: numFloat},
 		}
 	}
 	ret := []*AggrOperator{aggOp}
@@ -418,7 +493,7 @@ var (
 )
 
 func getCallVariable(c *influxql.Call) (string, error) {
-	if len(c.Args) != 1 && c.Name != CALL_TOP {
+	if len(c.Args) != 1 && !MUL_ARGS_AGGREGATOR.Has(c.Name) {
 		return "", errors.Errorf("length of call %q args %#v != 1", c.Name, c.Args)
 	}
 	switch args := c.Args[0].(type) {
@@ -435,17 +510,19 @@ func getCallVariable(c *influxql.Call) (string, error) {
 }
 
 type labelsVisitor struct {
-	err    error
-	labels []*labels.Matcher
-	curKey string
-	curOp  influxql.Token
-	curVal string
+	err           error
+	labels        []*labels.Matcher
+	curKey        string
+	curOp         influxql.Token
+	curVal        string
+	replaceLabels map[string]string
 }
 
 func newLabelsVisitor() *labelsVisitor {
 	return &labelsVisitor{
-		err:    nil,
-		labels: make([]*labels.Matcher, 0),
+		err:           nil,
+		labels:        make([]*labels.Matcher, 0),
+		replaceLabels: map[string]string{},
 	}
 }
 
@@ -488,18 +565,24 @@ func (l *labelsVisitor) commitLabel() error {
 }
 
 func (l *labelsVisitor) Visit(node influxql.Node) influxql.Visitor {
-	//fmt.Printf("-- visit: %#v\n", node)
+	//fmt.Printf("-- visit: %s, %#v\n", node, node)
 	if l.err != nil {
 		log.Printf("error happend: %v, visting skipped", l.err)
 		return l
 	}
 	switch expr := node.(type) {
 	case *influxql.BinaryExpr:
-		if expr.Op == influxql.OR {
-			l.err = errors.Errorf("%#v: OR is not suported yet.", expr)
-			return l
+		if expr.Op != influxql.OR && expr.Op != influxql.AND {
+			l.curOp = expr.Op
 		}
-		l.curOp = expr.Op
+		l.Visit(expr.LHS)
+		if expr.Op == influxql.OR {
+			curLabel := l.labels[len(l.labels)-1]
+			key := fmt.Sprintf("%s,", curLabel.String())
+			l.replaceLabels[key] = fmt.Sprintf("%s or ", curLabel.String())
+		}
+		l.Visit(expr.RHS)
+		return nil
 	case *influxql.VarRef:
 		l.curKey = expr.Val
 	case *influxql.StringLiteral:
@@ -516,11 +599,10 @@ func (l *labelsVisitor) Visit(node influxql.Node) influxql.Visitor {
 	return l
 }
 
-func (m promQL) getLabels(cond influxql.Expr) ([]*labels.Matcher, error) {
+func (m promQL) getLabels(v *labelsVisitor, cond influxql.Expr) ([]*labels.Matcher, error) {
 	if cond == nil {
 		return nil, nil
 	}
-	v := newLabelsVisitor()
 	influxql.Walk(v, cond)
 	return v.Labels(), v.Error()
 }

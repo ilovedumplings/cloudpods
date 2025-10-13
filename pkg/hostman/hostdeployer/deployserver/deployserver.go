@@ -22,6 +22,7 @@ import (
 	"net"
 	"os"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/netutils"
+	"yunion.io/x/pkg/utils"
 
 	app_common "yunion.io/x/onecloud/pkg/cloudcommon/app"
 	commonconsts "yunion.io/x/onecloud/pkg/cloudcommon/consts"
@@ -45,6 +47,7 @@ import (
 	"yunion.io/x/onecloud/pkg/hostman/guestfs/fsdriver"
 	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
 	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/consts"
+	"yunion.io/x/onecloud/pkg/hostman/hostdeployer/uefi"
 	"yunion.io/x/onecloud/pkg/util/fileutils2"
 	"yunion.io/x/onecloud/pkg/util/procutils"
 	"yunion.io/x/onecloud/pkg/util/qemuimg"
@@ -128,7 +131,16 @@ func (*DeployerServer) ResizeFs(ctx context.Context, req *deployapi.ResizeFsPara
 			res, err = nil, errors.Error(msg)
 		}
 	}()
-	log.Infof("********* Resize fs on %#v", apiDiskInfo(req.DiskInfo))
+
+	log.Infof("********* Resize fs on %#v", req.DiskInfo)
+	if strings.HasPrefix(req.DiskInfo.Path, "/dev/loop") {
+		// HACK: container loop device, do resize locally
+		if err := fsutils.ResizeDiskFs(req.DiskInfo.Path, 0, false); err != nil {
+			return new(deployapi.Empty), errors.Wrap(err, "fsutils.ResizeDiskFs")
+		}
+		return new(deployapi.Empty), nil
+	}
+
 	disk, err := diskutils.GetIDisk(diskutils.DiskParams{
 		Hypervisor: req.Hypervisor,
 		DiskInfo:   apiDiskInfo(req.GetDiskInfo()),
@@ -139,12 +151,16 @@ func (*DeployerServer) ResizeFs(ctx context.Context, req *deployapi.ResizeFsPara
 	}
 	defer disk.Cleanup()
 
-	if err := disk.Connect(nil); err != nil {
+	var diskId string
+	if req.DiskInfo != nil {
+		diskId = req.DiskInfo.DiskId
+	}
+	if err := disk.ConnectWithDiskId(req.GuestDesc, diskId); err != nil {
 		return new(deployapi.Empty), errors.Wrap(err, "disk connect failed")
 	}
 	defer disk.Disconnect()
 
-	return disk.ResizeFs()
+	return disk.ResizeFs(req)
 }
 
 func (*DeployerServer) FormatFs(ctx context.Context, req *deployapi.FormatFsParams) (*deployapi.Empty, error) {
@@ -255,6 +271,75 @@ func (*DeployerServer) DisconnectEsxiDisks(
 	return new(deployapi.Empty), nil
 }
 
+func (*DeployerServer) SetOvmfBootOrder(ctx context.Context, req *deployapi.OvmfBootOrderParams) (*deployapi.Empty, error) {
+	log.Infof("Request SetOvmfBootOrder of %s", req.OvmfVarsPath)
+	if !fileutils2.Exists(req.OvmfVarsPath) {
+		return new(deployapi.Empty), errors.Errorf("ovmf %s not found", req.OvmfVarsPath)
+	}
+
+	// parse boot entry from ovmf vars
+	bootEntries, bootOrder, ovmfJsonTmpPath, err := uefi.ParseUefiVars(req.OvmfVarsPath)
+	if err != nil {
+		return new(deployapi.Empty), errors.Wrapf(err, "failed parse uefi vars %s", req.OvmfVarsPath)
+	}
+
+	sort.Slice(req.Devs, func(i, j int) bool {
+		return req.Devs[i].AttachOrder < req.Devs[j].AttachOrder
+	})
+	bootEntryIdx := map[string]*deployapi.BootDevices{}
+	bootentryOrder := map[int32]string{}
+	findBootentry := func(dev *deployapi.BootDevices) {
+		for x, bootEntry := range bootEntries {
+			if _, ok := bootEntryIdx[bootEntry.ID]; ok {
+				continue
+			}
+			log.Errorf("bootentry %v type %v", x, bootEntry.GetType())
+			if bootEntry.GetType() == uefi.OvmfDevicePathType(dev.DevType) {
+				bootEntryIdx[bootEntry.ID] = dev
+				bootentryOrder[dev.BootOrder] = bootEntry.ID
+				break
+			}
+		}
+	}
+	for i := range req.Devs {
+		findBootentry(req.Devs[i])
+	}
+	sort.Slice(req.Devs, func(i, j int) bool {
+		return req.Devs[i].BootOrder < req.Devs[j].BootOrder
+	})
+	newBootOrder := []uint16{}
+	for i := range req.Devs {
+		bentry, ok := bootentryOrder[req.Devs[i].BootOrder]
+		if !ok {
+			continue
+		}
+		order, err := uefi.ParseBootentryToBootorder(bentry)
+		if err != nil {
+			log.Errorf("failed ParseBootentryToBootorder %s %s", bentry, err)
+			continue
+		}
+		newBootOrder = append(newBootOrder, order)
+	}
+	for i := range bootOrder {
+		if utils.IsInArray(bootOrder[i], newBootOrder) {
+			continue
+		}
+		newBootOrder = append(newBootOrder, bootOrder[i])
+	}
+
+	if err := uefi.UpdateBootOrderInJson(ovmfJsonTmpPath, newBootOrder); err != nil {
+		log.Errorf("failed UpdateBootOrderInJson %s", err)
+		return new(deployapi.Empty), errors.Wrapf(err, "failed UpdateBootOrderInJson %v", newBootOrder)
+	}
+	out, err := uefi.ApplyJsonToVars(ovmfJsonTmpPath, req.OvmfVarsPath, req.OvmfVarsPath)
+	if err != nil {
+		log.Errorf("failed ApplyJsonToVars %s %s", out, err)
+		return new(deployapi.Empty), errors.Wrapf(err, "failed ApplyJsonToVars %v", out)
+	}
+
+	return new(deployapi.Empty), nil
+}
+
 type SDeployService struct {
 	*service.SServiceBase
 
@@ -360,18 +445,33 @@ func (s *SDeployService) PrepareEnv() error {
 			return errors.Wrap(err, "nbd.Init")
 		}
 	} else {
+		cpuArch, err := procutils.NewCommand("uname", "-m").Output()
+		if err != nil {
+			return errors.Wrap(err, "get cpu architecture")
+		}
+		cpuArchStr := strings.TrimSpace(string(cpuArch))
+
 		// prepare for yunionos don't have but necessary files
 		out, err := procutils.NewCommand("mkdir", "-p", "/opt/yunion/bin/bundles").Output()
 		if err != nil {
 			return errors.Wrapf(err, "cp files failed %s", out)
 		}
-		for k, v := range map[string]string{
+		copyFiles := map[string]string{
 			"/usr/bin/chntpw.static":         "/opt/yunion/bin/chntpw.static",
 			"/usr/bin/.chntpw.static.bin":    "/opt/yunion/bin/.chntpw.static.bin",
 			"/usr/bin/bundles/chntpw.static": "/opt/yunion/bin/bundles/chntpw.static",
 			"/usr/bin/growpart":              "/opt/yunion/bin/growpart",
 			"/usr/sbin/zerofree":             "/opt/yunion/bin/zerofree",
-		} {
+		}
+		// x86_64 or aarch64
+		if cpuArchStr == qemu_kvm.OS_ARCH_AARCH64 {
+			copyFiles["/yunionos/aarch64/qemu-ga"] = fsdriver.QGA_BINARY_PATH
+		} else {
+			copyFiles["/yunionos/x86_64/qemu-ga"] = fsdriver.QGA_BINARY_PATH
+			copyFiles["/yunionos/x86_64/qemu-ga-x86_64.msi"] = fsdriver.QGA_WIN_MSI_INSTALLER_PATH
+		}
+
+		for k, v := range copyFiles {
 			out, err = procutils.NewCommand("cp", "-rf", k, v).Output()
 			if err != nil {
 				return errors.Wrapf(err, "cp files failed %s", out)
@@ -401,13 +501,8 @@ func (s *SDeployService) PrepareEnv() error {
 			return errors.Wrapf(err, "mkisofs failed %s", out)
 		}
 
-		cpuArch, err := procutils.NewCommand("uname", "-m").Output()
-		if err != nil {
-			return errors.Wrap(err, "get cpu architecture")
-		}
-
 		err = qemu_kvm.InitQemuDeployManager(
-			strings.TrimSpace(string(cpuArch)),
+			cpuArchStr,
 			DeployOption.DefaultQemuVersion,
 			DeployOption.EnableRemoteExecutor,
 			DeployOption.HugepagesOption == "native",

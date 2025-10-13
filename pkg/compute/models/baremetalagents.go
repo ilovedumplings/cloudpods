@@ -32,6 +32,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=baremetalagent
+// +onecloud:swagger-gen-model-plural=baremetalagents
 type SBaremetalagentManager struct {
 	db.SStandaloneResourceBaseManager
 	SZoneResourceBaseManager
@@ -42,7 +44,7 @@ type SBaremetalagent struct {
 	SZoneResourceBase `width:"128" charset:"ascii" nullable:"false" list:"admin" update:"admin" create:"admin_required"`
 
 	Status     string `width:"36" charset:"ascii" nullable:"false" default:"disable" create:"optional"`
-	AccessIp   string `width:"16" charset:"ascii" nullable:"false" list:"admin" update:"admin" create:"admin_required"`
+	AccessIp   string `width:"64" charset:"ascii" nullable:"false" list:"admin" update:"admin" create:"admin_required"`
 	ManagerUri string `width:"256" charset:"ascii" nullable:"true" list:"admin" update:"admin" create:"admin_required"`
 	// ZoneId     string `width:"128" charset:"ascii" nullable:"false" list:"admin" update:"admin" create:"admin_required"`
 

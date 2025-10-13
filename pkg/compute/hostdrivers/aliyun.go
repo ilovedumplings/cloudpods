@@ -43,6 +43,10 @@ func (self *SAliyunHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_ALIYUN
 }
 
+func (self *SAliyunHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_ALIYUN
+}
+
 func (self *SAliyunHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	minGB := -1
 	maxGB := -1
@@ -59,6 +63,12 @@ func (self *SAliyunHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb
 	case api.STORAGE_PUBLIC_CLOUD:
 		minGB = 5
 		maxGB = 2000
+	case api.STORAGE_CLOUD_AUTO:
+		minGB = 1
+		maxGB = 65536
+	case api.STORAGE_CLOUD_ESSD_ENTRY:
+		minGB = 10
+		maxGB = 32768
 	default:
 		return fmt.Errorf("Not support resize %s disk", storage.StorageType)
 	}

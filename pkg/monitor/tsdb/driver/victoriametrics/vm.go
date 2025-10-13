@@ -17,15 +17,14 @@ package victoriametrics
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/influxdata/influxql"
 	"github.com/influxdata/promql/v2/pkg/labels"
 	"github.com/zexi/influxql-to-metricsql/converter"
 	"github.com/zexi/influxql-to-metricsql/converter/translator"
+	"golang.org/x/sync/errgroup"
 
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
@@ -56,19 +55,28 @@ func NewVMAdapter(datasource *tsdb.DataSource) (tsdb.TsdbQueryEndpoint, error) {
 
 // Query implements tsdb.TsdbQueryEndpoint.
 func (vm *vmAdapter) Query(ctx context.Context, ds *tsdb.DataSource, query *tsdb.TsdbQuery) (*tsdb.Response, error) {
+	// TODO: use interval inside query
+	tsdbResp, _, err := vm.query(ctx, ds, query)
+	if err != nil {
+		return nil, err
+	}
+	return tsdbResp, nil
+}
+
+func (vm *vmAdapter) query(ctx context.Context, ds *tsdb.DataSource, query *tsdb.TsdbQuery) (*tsdb.Response, *Response, error) {
 	rawQuery, influxQs, err := vm.influxdbExecutor.GetRawQuery(ds, query)
 	if err != nil {
-		return nil, errors.Wrapf(err, "get influxdb raw query: %#v", influxQs)
+		return nil, nil, errors.Wrapf(err, "get influxdb raw query: %#v", influxQs)
 	}
 
 	// TODO: use interval inside query
 	return queryByRaw(ctx, ds, rawQuery, query, influxQs[0].Interval)
 }
 
-func queryByRaw(ctx context.Context, ds *tsdb.DataSource, rawQuery string, query *tsdb.TsdbQuery, interval time.Duration) (*tsdb.Response, error) {
+func queryByRaw(ctx context.Context, ds *tsdb.DataSource, rawQuery string, query *tsdb.TsdbQuery, interval time.Duration) (*tsdb.Response, *Response, error) {
 	promQL, tr, err := convertInfluxQL(rawQuery)
 	if err != nil {
-		return nil, errors.Wrap(err, "convert influxQL to promQL")
+		return nil, nil, errors.Wrap(err, "convert influxQL to promQL")
 	}
 
 	start := time.Now()
@@ -78,17 +86,17 @@ func queryByRaw(ctx context.Context, ds *tsdb.DataSource, rawQuery string, query
 
 	resp, err := queryRange(ctx, ds, tr, promQL, interval)
 	if err != nil {
-		return nil, errors.Wrapf(err, "query VM range by: %s", promQL)
+		return nil, nil, errors.Wrapf(err, "query VM range by: %s", promQL)
 	}
 
-	//log.Infof("get vm resp: %s", jsonutils.Marshal(resp).PrettyString())
+	//log.Infof("get vm %s resp: %s", promQL, jsonutils.Marshal(resp).PrettyString())
 
 	tsdbRet, err := convertVMResponse(rawQuery, query, resp)
 	if err != nil {
-		return nil, errors.Wrapf(err, "convert to tsdb.Response")
+		return nil, resp, errors.Wrapf(err, "convert to tsdb.Response")
 	}
 
-	return tsdbRet, nil
+	return tsdbRet, resp, nil
 }
 
 func queryRange(ctx context.Context, ds *tsdb.DataSource, tr *influxql.TimeRange, promQL string, interval time.Duration) (*Response, error) {
@@ -141,9 +149,30 @@ func translateResponse(resp *Response, query *tsdb.Query) (*tsdb.QueryResult, er
 	if len(results) > 0 {
 		_, isUnionResult = results[0].Metric[translator.UNION_RESULT_NAME]
 	}
+
+	// 添加值不同的 tag key
+	diffTagKeys := sets.NewString()
+	if len(results) > 1 {
+		result0 := results[0]
+		restResults := results[1:]
+		for tagKey, tagVal := range result0.Metric {
+			for _, result := range restResults {
+				resultTagVal := result.Metric[tagKey]
+				if tagVal != resultTagVal {
+					diffTagKeys.Insert(tagKey)
+					break
+				}
+			}
+		}
+	} else if len(results) == 1 {
+		for tagKey := range results[0].Metric {
+			diffTagKeys.Insert(tagKey)
+		}
+	}
+
 	if !isUnionResult {
 		for _, result := range results {
-			ss := transformSeries(result, query)
+			ss := transformSeries(result, query, diffTagKeys)
 			queryRes.Series = append(queryRes.Series, ss...)
 		}
 	} else {
@@ -160,7 +189,7 @@ func translateResponse(resp *Response, query *tsdb.Query) (*tsdb.QueryResult, er
 }
 
 // Check VictoriaMetrics response at: https://docs.victoriametrics.com/keyConcepts.html#range-query
-func transformSeries(vmResult ResponseDataResult, query *tsdb.Query) monitor.TimeSeriesSlice {
+func transformSeries(vmResult ResponseDataResult, query *tsdb.Query, diffTagKeys sets.String) monitor.TimeSeriesSlice {
 	var result monitor.TimeSeriesSlice
 	metric := vmResult.Metric
 
@@ -183,12 +212,12 @@ func transformSeries(vmResult ResponseDataResult, query *tsdb.Query) monitor.Tim
 	if aliasName != "" {
 		metricName = aliasName
 	}
-	ts := tsdb.NewTimeSeries(metricName, formatRawName(0, metricName, query, tags), []string{metricName, "time"}, points, tags)
+	ts := tsdb.NewTimeSeries(metricName, formatRawName(0, metricName, query, tags, diffTagKeys), []string{metricName, "time"}, points, tags)
 	result = append(result, ts)
 	return result
 }
 
-func formatRawName(idx int, name string, query *tsdb.Query, tags map[string]string) string {
+func formatRawName(idx int, name string, query *tsdb.Query, tags map[string]string, diffTagKeys sets.String) string {
 	groupByTags := []string{}
 	if query != nil {
 		for _, group := range query.GroupBy {
@@ -197,7 +226,7 @@ func formatRawName(idx int, name string, query *tsdb.Query, tags map[string]stri
 			}
 		}
 	}
-	return tsdb.FormatRawName(idx, name, groupByTags, tags)
+	return tsdb.FormatRawName(idx, name, groupByTags, tags, diffTagKeys)
 }
 
 func parseTimepoint(val ResponseDataResultValue) (monitor.TimePoint, error) {
@@ -249,34 +278,58 @@ func parsePointValue(value interface{}) interface{} {
 	return number.String()
 }
 
-func (vm *vmAdapter) FilterMeasurement(ctx context.Context, ds *tsdb.DataSource, from, to string, ms *monitor.InfluxMeasurement, tagFilter *monitor.MetricQueryTag) (*monitor.InfluxMeasurement, error) {
-	retMs := new(monitor.InfluxMeasurement)
+func (vm *vmAdapter) checkMeasurementField(ctx context.Context, ds *tsdb.DataSource, from, to string, ms *monitor.InfluxMeasurement, field string, tagFilter *monitor.MetricQueryTag) (bool, error) {
 	q := mod.NewAlertQuery(ms.Database, ms.Measurement).From(from).To(to)
-	q.Interval("5m")
-	q.Selects().Select("*").LAST()
+	q.Interval("30m")
+	q.Selects().Select(field).COUNT()
 	if tagFilter != nil {
 		q.Where().AddTag(tagFilter)
 	}
-	q.GroupBy().TAG(labels.MetricName)
 	tq := q.ToTsdbQuery()
-	resp, err := vm.Query(ctx, ds, tq)
+	resp, rawResp, err := vm.query(ctx, ds, tq)
 	if err != nil {
-		return nil, errors.Wrap(err, "VictoriaMetrics.Query")
+		return false, errors.Wrap(err, "VictoriaMetrics.Query")
 	}
 	ss := resp.Results[""].Series
-	//log.Infof("=====get ss: %s", jsonutils.Marshal(ss).PrettyString())
-
-	// parse fields
-	retFields := sets.NewString()
-	msPrefix := fmt.Sprintf("%s_", ms.Measurement)
 	for _, s := range ss {
-		cols := s.Columns
-		for _, col := range cols {
-			if !strings.HasPrefix(col, msPrefix) {
-				continue
+		if len(s.Points) > 0 {
+			return true, nil
+		}
+	}
+	if rawResp.Stats.SeriesFetched != "" {
+		fetched, _ := strconv.Atoi(rawResp.Stats.SeriesFetched)
+		if fetched >= 1 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (vm *vmAdapter) FilterMeasurement(ctx context.Context, ds *tsdb.DataSource, from, to string, ms *monitor.InfluxMeasurement, tagFilter *monitor.MetricQueryTag) (*monitor.InfluxMeasurement, error) {
+	retMs := new(monitor.InfluxMeasurement)
+	retFieldExists := make([]bool, len(ms.FieldKey))
+	errgrp := new(errgroup.Group)
+	for i := range ms.FieldKey {
+		index := i
+		errgrp.Go(func() error {
+			field := ms.FieldKey[index]
+			exists, err := vm.checkMeasurementField(ctx, ds, from, to, ms, field, tagFilter)
+			if err != nil {
+				return errors.Wrapf(err, "check meaurement field %s %s", ms.Measurement, field)
 			}
-			field := strings.TrimPrefix(col, msPrefix)
-			retFields.Insert(field)
+			if exists {
+				retFieldExists[index] = true
+			}
+			return nil
+		})
+	}
+	if err := errgrp.Wait(); err != nil {
+		log.Warningf("victoriametrics check measurement field: %s", err)
+	}
+	retFields := sets.NewString()
+	for i := range retFieldExists {
+		if retFieldExists[i] {
+			retFields.Insert(ms.FieldKey[i])
 		}
 	}
 	retMs.FieldKey = retFields.List()
@@ -286,4 +339,30 @@ func (vm *vmAdapter) FilterMeasurement(ctx context.Context, ds *tsdb.DataSource,
 		retMs.ResType = ms.ResType
 	}
 	return retMs, nil
+}
+
+func (vm *vmAdapter) FillSelect(query *monitor.AlertQuery, isAlert bool) *monitor.AlertQuery {
+	if isAlert {
+		query = influxdb.FillSelectWithMean(query)
+	}
+	return query
+}
+
+func (vm *vmAdapter) FillGroupBy(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryInput, tagId string, isAlert bool) *monitor.AlertQuery {
+	if isAlert {
+		query = FillGroupByWithWildChar(query, inputQuery, tagId)
+	}
+	return query
+}
+
+func FillGroupByWithWildChar(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryInput, tagId string) *monitor.AlertQuery {
+	if len(tagId) == 0 {
+		tagId = "*"
+	}
+	query.Model.GroupBy = append(query.Model.GroupBy,
+		monitor.MetricQueryPart{
+			Type:   "field",
+			Params: []string{tagId},
+		})
+	return query
 }

@@ -20,6 +20,7 @@ import (
 	"io/ioutil"
 	"os"
 	"strings"
+	"time"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
@@ -27,6 +28,7 @@ import (
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/utils"
 
+	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/lockman"
 	"yunion.io/x/onecloud/pkg/util/fileutils2"
 	"yunion.io/x/onecloud/pkg/util/procutils"
@@ -39,10 +41,14 @@ type CephClient struct {
 	cephConf string
 	keyConf  string
 
-	timeout int
+	timeout        int
+	persistentConf bool
 }
 
 func (cli *CephClient) Close() error {
+	if cli.persistentConf {
+		return nil
+	}
 	if len(cli.keyConf) > 0 {
 		os.Remove(cli.keyConf)
 	}
@@ -156,6 +162,10 @@ func (cli *CephClient) CreateImage(name string, sizeMb int64) (*SImage, error) {
 	return image, cli.run("rbd", opts, false)
 }
 
+/*
+ * {"kb_used":193408,"bytes_used":198049792,"percent_used":0.32,"bytes_used2":0,"percent_used2":0.00,"osd_max_used":0,"osd_max_used_ratio":0.32,"max_avail":61003137024,"objects":1,"origin_bytes":0,"compress_bytes":0}
+ * {"stored":6198990973173,"objects":1734699,"kb_used":12132844593,"bytes_used":12424032862699,"percent_used":0.30800202488899231,"max_avail":13956734255104}
+ */
 func (cli *CephClient) GetCapacity() (*SCapacity, error) {
 	result := &SCapacity{}
 	opts := cli.options()
@@ -173,9 +183,13 @@ func (cli *CephClient) GetCapacity() (*SCapacity, error) {
 	result.UsedCapacitySizeKb = stats.Stats.TotalUsedBytes / 1024
 	for _, pool := range stats.Pools {
 		if pool.Name == cli.pool {
-			result.UsedCapacitySizeKb = int64(pool.Stats.Stored / 1024)
+			if pool.Stats.Stored > 0 {
+				result.UsedCapacitySizeKb = int64(pool.Stats.Stored / 1024)
+			} else {
+				result.UsedCapacitySizeKb = int64(pool.Stats.BytesUsed / 1024)
+			}
 			if pool.Stats.MaxAvail > 0 {
-				result.CapacitySizeKb = int64(pool.Stats.MaxAvail/1024 + int64(pool.Stats.Stored/1024))
+				result.CapacitySizeKb = int64(pool.Stats.MaxAvail/1024) + result.UsedCapacitySizeKb
 			}
 		}
 	}
@@ -186,7 +200,7 @@ func (cli *CephClient) GetCapacity() (*SCapacity, error) {
 }
 
 func writeFile(pattern string, content string) (string, error) {
-	file, err := ioutil.TempFile("", pattern)
+	file, err := ioutil.TempFile(cephConfTmpDir, pattern)
 	if err != nil {
 		return "", errors.Wrapf(err, "TempFile")
 	}
@@ -221,7 +235,35 @@ func (cli *CephClient) SetTimeout(timeout int) {
 
 const DEFAULT_TIMTOUT_SECOND = 15
 
-func NewClient(monHost, key, pool string) (*CephClient, error) {
+var cephConfTmpDir = ""
+
+func SetCephConfTempDir(dir string) {
+	cephConfTmpDir = dir
+}
+
+func NewClientAndPersistentConf(
+	monHost, key, pool string, enableMessengerV2 bool,
+	radosMonTimeout, radosOsdTimeout, clientMountTimeout int,
+	confPath, keyringPath string,
+) (*CephClient, error) {
+	if len(confPath) == 0 || len(keyringPath) == 0 {
+		return nil, errors.Errorf("empty conf path %s %s", confPath, keyringPath)
+	}
+	return newClient(monHost, key, pool, enableMessengerV2, radosMonTimeout, radosOsdTimeout, clientMountTimeout, confPath, keyringPath)
+}
+
+func NewClient(
+	monHost, key, pool string, enableMessengerV2 bool,
+	radosMonTimeout, radosOsdTimeout, clientMountTimeout int,
+) (*CephClient, error) {
+	return newClient(monHost, key, pool, enableMessengerV2, radosMonTimeout, radosOsdTimeout, clientMountTimeout, "", "")
+}
+
+func newClient(
+	monHost, key, pool string, enableMessengerV2 bool,
+	radosMonTimeout, radosOsdTimeout, clientMountTimeout int,
+	confPath, keyringPath string,
+) (*CephClient, error) {
 	client := &CephClient{
 		monHost: monHost,
 		key:     key,
@@ -233,21 +275,47 @@ func NewClient(monHost, key, pool string) (*CephClient, error) {
 		keyring := fmt.Sprintf(`[client.admin]
 	key = %s
 `, client.key)
-		client.keyConf, err = writeFile("ceph.*.keyring", keyring)
-		if err != nil {
-			return nil, errors.Wrapf(err, "write keyring")
+		if len(keyringPath) == 0 {
+			client.keyConf, err = writeFile("ceph.*.keyring", keyring)
+			if err != nil {
+				return nil, errors.Wrapf(err, "write keyring")
+			}
+		} else {
+			err = fileutils2.FilePutContents(keyringPath, keyring, false)
+			if err != nil {
+				return nil, errors.Wrapf(err, "write keyring to %s", keyringPath)
+			}
+			client.keyConf = keyringPath
+			client.persistentConf = true
 		}
 	}
 	monHosts := []string{}
-	for _, monHost := range strings.Split(client.monHost, ",") {
-		monHosts = append(monHosts, fmt.Sprintf(`[%s]`, monHost))
+	if enableMessengerV2 {
+		for _, monHost := range strings.Split(client.monHost, ",") {
+			monHosts = append(monHosts, fmt.Sprintf(`[v2:%s:3300/0,v1:%s:6789/0]`, monHost, monHost))
+		}
+	} else {
+		for _, monHost := range strings.Split(client.monHost, ",") {
+			monHosts = append(monHosts, fmt.Sprintf(`[%s]`, monHost))
+		}
 	}
+	client.monHost = strings.Join(monHosts, ",")
+	if radosMonTimeout <= 0 {
+		radosMonTimeout = api.RBD_DEFAULT_MON_TIMEOUT
+	}
+	if radosOsdTimeout <= 0 {
+		radosOsdTimeout = api.RBD_DEFAULT_OSD_TIMEOUT
+	}
+	if clientMountTimeout <= 0 {
+		clientMountTimeout = api.RBD_DEFAULT_MOUNT_TIMEOUT
+	}
+
 	conf := fmt.Sprintf(`[global]
 mon host = %s
-rados mon op timeout = 5
-rados osd_op timeout = 1200
-client mount timeout = 120
-`, strings.Join(monHosts, ","))
+rados mon op timeout = %d
+rados osd_op timeout = %d
+client mount timeout = %d
+`, client.monHost, radosMonTimeout, radosOsdTimeout, clientMountTimeout)
 	if len(client.key) == 0 {
 		conf = fmt.Sprintf(`%s
 auth_cluster_required = none
@@ -259,17 +327,72 @@ auth_client_required = none
 keyring = %s
 `, conf, client.keyConf)
 	}
-	client.cephConf, err = writeFile("ceph.*.conf", conf)
-	if err != nil {
-		return nil, errors.Wrapf(err, "write file")
+	if len(confPath) == 0 {
+		client.cephConf, err = writeFile("ceph.*.conf", conf)
+		if err != nil {
+			return nil, errors.Wrapf(err, "write file")
+		}
+	} else {
+		err = fileutils2.FilePutContents(confPath, conf, false)
+		if err != nil {
+			return nil, errors.Wrapf(err, "write conf to %s", confPath)
+		}
+		client.cephConf = confPath
+		client.persistentConf = true
 	}
+
 	return client, nil
+}
+
+func CephConfString(monHost, key string, radosMonOpTimeout, radosOsdOpTimeout, clientMountTimeout int) string {
+	conf := []string{}
+	monHosts := strings.Split(monHost, ",")
+	for i := range monHosts {
+		if strings.Contains(monHosts[i], ":") {
+			monHosts[i] = `\[` + strings.ReplaceAll(monHosts[i], ":", `\:`) + `\]`
+		}
+	}
+	monHost = strings.Join(monHosts, ",")
+	conf = append(conf, "mon_host="+strings.ReplaceAll(monHost, ",", `\;`))
+	if len(key) > 0 {
+		for _, k := range []string{":", "@", "="} {
+			key = strings.ReplaceAll(key, k, fmt.Sprintf(`\%s`, k))
+		}
+		conf = append(conf, "key="+key)
+	}
+	for k, timeout := range map[string]int{
+		"rados_mon_op_timeout": radosMonOpTimeout,
+		"rados_osd_op_timeout": radosOsdOpTimeout,
+		"client_mount_timeout": clientMountTimeout,
+	} {
+		conf = append(conf, fmt.Sprintf("%s=%d", k, timeout))
+	}
+	return ":" + strings.Join(conf, ":")
 }
 
 func (cli *CephClient) Child(pool string) *CephClient {
 	newCli := *cli
 	newCli.pool = pool
 	return &newCli
+}
+
+type SFsid struct {
+	Fsid string
+}
+
+func (cli *CephClient) Fsid() (string, error) {
+	opts := cli.options()
+	opts = append(opts, "fsid")
+	resp, err := cli.output("ceph", opts, true)
+	if err != nil {
+		return "", err
+	}
+	fsid := SFsid{}
+	err = resp.Unmarshal(&fsid)
+	if err != nil {
+		return "", err
+	}
+	return fsid.Fsid, nil
 }
 
 type SImage struct {
@@ -320,9 +443,9 @@ type SImageInfo struct {
 	Features        []string      `json:"features"`
 	OpFeatures      []interface{} `json:"op_features"`
 	Flags           []interface{} `json:"flags"`
-	CreateTimestamp string        `json:"create_timestamp"`
-	AccessTimestamp string        `json:"access_timestamp"`
-	ModifyTimestamp string        `json:"modify_timestamp"`
+	CreateTimestamp time.Time     `json:"create_timestamp"`
+	AccessTimestamp time.Time     `json:"access_timestamp"`
+	ModifyTimestamp time.Time     `json:"modify_timestamp"`
 }
 
 func (img *SImage) options() []string {

@@ -147,6 +147,8 @@ func (self *SDatastore) getVolumeId() (string, error) {
 		return fsInfo.Vmfs.Uuid, nil
 	case *types.NasDatastoreInfo:
 		return fmt.Sprintf("%s:%s", fsInfo.Nas.RemoteHost, fsInfo.Nas.RemotePath), nil
+	case *types.PMemDatastoreInfo:
+		return strings.TrimPrefix(fsInfo.Url, "ds:///"), nil
 	}
 	if moStore.Summary.Type == "vsan" {
 		vsanId := moStore.Summary.Url
@@ -189,6 +191,9 @@ func (self *SDatastore) getAttachedHosts() ([]cloudprovider.ICloudHost, error) {
 		idstr := moRefId(moStore.Host[i].Key)
 		host, err := self.datacenter.GetIHostByMoId(idstr)
 		if err != nil {
+			if errors.Cause(err) == cloudprovider.ErrNotFound {
+				continue
+			}
 			return nil, err
 		}
 		ihosts = append(ihosts, host)
@@ -257,14 +262,14 @@ func (self *SDatastore) GetIZone() cloudprovider.ICloudZone {
 
 func (self *SDatastore) FetchNoTemplateVMs() ([]*SVirtualMachine, error) {
 	mods := self.getDatastore()
-	filter := property.Filter{}
+	filter := property.Match{}
 	filter["datastore"] = mods.Reference()
 	return self.datacenter.fetchVMsWithFilter(filter)
 }
 
 func (self *SDatastore) FetchTemplateVMs() ([]*SVirtualMachine, error) {
 	mods := self.getDatastore()
-	filter := property.Filter{}
+	filter := property.Match{}
 	filter["config.template"] = true
 	filter["datastore"] = mods.Reference()
 	return self.datacenter.fetchVMsWithFilter(filter)
@@ -272,7 +277,7 @@ func (self *SDatastore) FetchTemplateVMs() ([]*SVirtualMachine, error) {
 
 func (self *SDatastore) FetchTemplateVMById(id string) (*SVirtualMachine, error) {
 	mods := self.getDatastore()
-	filter := property.Filter{}
+	filter := property.Match{}
 	uuid := toTemplateUuid(id)
 	filter["summary.config.uuid"] = uuid
 	filter["config.template"] = true
@@ -289,7 +294,7 @@ func (self *SDatastore) FetchTemplateVMById(id string) (*SVirtualMachine, error)
 
 func (self *SDatastore) FetchFakeTempateVMById(id string, regex string) (*SVirtualMachine, error) {
 	mods := self.getDatastore()
-	filter := property.Filter{}
+	filter := property.Match{}
 	uuid := toTemplateUuid(id)
 	filter["summary.config.uuid"] = uuid
 	filter["datastore"] = mods.Reference()
@@ -311,7 +316,7 @@ func (self *SDatastore) FetchFakeTempateVMById(id string, regex string) (*SVirtu
 
 func (self *SDatastore) FetchFakeTempateVMs(regex string) ([]*SVirtualMachine, error) {
 	mods := self.getDatastore()
-	filter := property.Filter{}
+	filter := property.Match{}
 	filter["datastore"] = mods.Reference()
 	filter["summary.runtime.powerState"] = types.VirtualMachinePowerStatePoweredOff
 	filter["config.template"] = false
@@ -411,10 +416,12 @@ func (self *SDatastore) GetStorageType() string {
 		}
 	case "nfs", "nfs41":
 		return api.STORAGE_NFS
-	case "vsan":
+	case "vsan", "vsand":
 		return api.STORAGE_VSAN
 	case "cifs":
 		return api.STORAGE_CIFS
+	case "pmem":
+		return api.STORAGE_PMEM
 	default:
 		log.Fatalf("unsupported datastore type %s", moStore.Summary.Type)
 		return ""
@@ -607,10 +614,13 @@ func (self *SDatastore) ListDir(ctx context.Context, remotePath string) ([]SData
 	return ret, nil
 }
 
-func (self *SDatastore) listPath(b *object.HostDatastoreBrowser, path string, spec types.HostDatastoreBrowserSearchSpec) ([]types.HostDatastoreBrowserSearchResults, error) {
-	ctx := context.TODO()
+func (self *SDatastore) listPath(ctx context.Context, b *object.HostDatastoreBrowser, path string, spec types.HostDatastoreBrowserSearchSpec) ([]types.HostDatastoreBrowserSearchResults, error) {
+	ds, err := self.getDatastoreObj(ctx)
+	if err != nil {
+		return nil, errors.Wrapf(err, "getDatastoreObj")
+	}
 
-	path = self.getDatastoreObj().Path(path)
+	path = ds.Path(path)
 
 	search := b.SearchDatastore
 
@@ -636,8 +646,10 @@ func (self *SDatastore) listPath(b *object.HostDatastoreBrowser, path string, sp
 }
 
 func (self *SDatastore) ListPath(ctx context.Context, remotePath string) ([]types.HostDatastoreBrowserSearchResults, error) {
-	//types.HostDatastoreBrowserSearchResults
-	ds := self.getDatastoreObj()
+	ds, err := self.getDatastoreObj(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	b, err := ds.Browser(ctx)
 	if err != nil {
@@ -657,7 +669,7 @@ func (self *SDatastore) ListPath(ctx context.Context, remotePath string) ([]type
 	}
 
 	for i := 0; ; i++ {
-		r, err := self.listPath(b, remotePath, spec)
+		r, err := self.listPath(ctx, b, remotePath, spec)
 		if err != nil {
 			// Treat the argument as a match pattern if not found as directory
 			if i == 0 && types.IsFileNotFound(err) || isInvalid(err) {
@@ -697,7 +709,7 @@ func (self *SDatastore) CheckFile(ctx context.Context, remotePath string) (*SDat
 
 	req, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrapf(err, "HEAD %s", url)
 	}
 
 	var size uint64
@@ -775,7 +787,7 @@ func (self *SDatastore) Upload(ctx context.Context, remotePath string, body io.R
 		if resp.StatusCode >= 400 {
 			return fmt.Errorf("%s", resp.Status)
 		}
-		_, err := ioutil.ReadAll(resp.Body)
+		_, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return err
 		}
@@ -794,8 +806,10 @@ func (self *SDatastore) FilePutContent(ctx context.Context, remotePath string, c
 // isNamespace: remotePath is uuid of namespace on vsan datastore
 // force: ignore nonexistent files and arguments
 func (self *SDatastore) Delete2(ctx context.Context, remotePath string, isNamespace, force bool) error {
-	var err error
-	ds := self.getDatastoreObj()
+	ds, err := self.getDatastoreObj(ctx)
+	if err != nil {
+		return errors.Wrapf(err, "getDatastoreObj")
+	}
 	dc := self.datacenter.getObjectDatacenter()
 	if isNamespace {
 		nm := object.NewDatastoreNamespaceManager(self.manager.client.Client)
@@ -824,7 +838,7 @@ func (self *SDatastore) Delete(ctx context.Context, remotePath string) error {
 		if resp.StatusCode >= 400 {
 			return fmt.Errorf("%s", resp.Status)
 		}
-		_, err := ioutil.ReadAll(resp.Body)
+		_, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return err
 		}
@@ -891,11 +905,13 @@ func (self *SDatastore) CheckVmdk(ctx context.Context, remotePath string) error 
 	return nil
 }
 
-func (self *SDatastore) getDatastoreObj() *object.Datastore {
+func (self *SDatastore) getDatastoreObj(ctx context.Context) (*object.Datastore, error) {
 	od := object.NewDatastore(self.manager.client.Client, self.getDatastore().Self)
-	od.DatacenterPath = self.GetDatacenterPathString()
-	od.InventoryPath = fmt.Sprintf("%s/%s", od.DatacenterPath, self.SManagedObject.GetName())
-	return od
+	err := od.FindInventoryPath(ctx)
+	if err != nil {
+		return nil, errors.Wrapf(err, "FindInventoryPath")
+	}
+	return od, nil
 }
 
 func (self *SDatastore) MakeDir(remotePath string) error {
@@ -994,16 +1010,23 @@ func (self *SDatastore) ImportVMDK(ctx context.Context, diskFile, remotePath str
 		return errors.Wrap(err, "SDatastore.CheckDirC")
 	}
 
-	fm := self.getDatastoreObj().NewFileManager(self.datacenter.getObjectDatacenter(), true)
+	ds, err := self.getDatastoreObj(ctx)
+	if err != nil {
+		return errors.Wrapf(err, "getDatastoreObj")
+	}
+	fm := ds.NewFileManager(self.datacenter.getObjectDatacenter(), true)
 
 	// if image_cache not exist
 	return fm.Move(ctx, fmt.Sprintf("[%s] %s/%s.vmdk", self.GetRelName(), name, name), fmt.Sprintf("[%s] %s",
 		self.GetRelName(), remotePath))
 }
 
-func (self *SDatastore) ImportISO(ctx context.Context, isoFile, remotePath string, host *SHost) error {
+func (self *SDatastore) ImportISO(ctx context.Context, isoFile, remotePath string) error {
 	p := soap.DefaultUpload
-	ds := self.getDatastoreObj()
+	ds, err := self.getDatastoreObj(ctx)
+	if err != nil {
+		return errors.Wrapf(err, "getDatastoreObj")
+	}
 	return ds.UploadFile(ctx, isoFile, remotePath, &p)
 }
 
@@ -1103,10 +1126,11 @@ type ImportParams struct {
 // ImportVM will import a vm by uploading a local vmdk
 func (self *SDatastore) ImportVM(ctx context.Context, diskFile, name string, host *SHost) (*object.VirtualMachine, error) {
 
-	var (
-		c         = self.manager.client.Client
-		datastore = self.getDatastoreObj()
-	)
+	c := self.manager.client.Client
+	datastore, err := self.getDatastoreObj(ctx)
+	if err != nil {
+		return nil, errors.Wrapf(err, "getDatastoreObj")
+	}
 
 	m := ovf.NewManager(c)
 

@@ -19,7 +19,9 @@ import (
 
 	"yunion.io/x/jsonutils"
 
+	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
+	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
 	"yunion.io/x/onecloud/pkg/mcclient"
 )
 
@@ -61,8 +63,22 @@ type SDiskCleanupSnapshots struct {
 	DeleteSnapshots  []jsonutils.JSONObject
 }
 
+type SStorageDeleteSnapshots struct {
+	DiskId      string
+	SnapshotIds []string
+}
+
+type SStorageDeleteSnapshot struct {
+	DiskId          string
+	SnapshotId      string
+	ConvertSnapshot string
+	BlockStream     bool
+	EncryptInfo     apis.SEncryptInfo
+}
+
 type SDiskBackup struct {
 	SnapshotId              string              `json:"snapshot_id"`
+	SnapshotLocation        string              `json:"snapshot_location"`
 	BackupId                string              `json:"backup_id"`
 	BackupStorageId         string              `json:"backup_storage_id"`
 	BackupStorageAccessInfo *jsonutils.JSONDict `json:"backup_storage_access_info"`
@@ -74,6 +90,7 @@ type SDiskBackup struct {
 
 type SStorageBackup struct {
 	BackupId                string
+	BackupLocalPath         string
 	BackupStorageId         string
 	BackupStorageAccessInfo *jsonutils.JSONDict
 }
@@ -104,4 +121,9 @@ type SStorageUnpackInstanceBackup struct {
 type SStorageSaveToGlanceInfo struct {
 	UserCred mcclient.TokenCredential
 	DiskInfo *jsonutils.JSONDict
+}
+
+type SDiskResizeInput struct {
+	DiskInfo  jsonutils.JSONObject
+	GuestDesc *deployapi.GuestDesc
 }

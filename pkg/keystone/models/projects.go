@@ -224,6 +224,7 @@ func (manager *SProjectManager) FetchProject(projectId, projectName string, doma
 	return nil, fmt.Errorf("no project Id or name provided")
 }
 
+// +onecloud:model-api-gen
 type SProjectExtended struct {
 	SProject
 
@@ -732,6 +733,12 @@ func (project *SProject) PerformJoin(
 			if err != nil {
 				return nil, httperrors.NewGeneralError(err)
 			}
+		}
+	}
+
+	if input.EnableAllUsers {
+		for i := range users {
+			db.EnabledPerformEnable(users[i], ctx, userCred, true)
 		}
 	}
 

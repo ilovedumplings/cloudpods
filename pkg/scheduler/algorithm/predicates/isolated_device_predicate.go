@@ -38,6 +38,11 @@ func (f *IsolatedDevicePredicate) Clone() core.FitPredicate {
 
 func (f *IsolatedDevicePredicate) PreExecute(ctx context.Context, u *core.Unit, cs []core.Candidater) (bool, error) {
 	data := u.SchedData()
+
+	if data.ResetCpuNumaPin {
+		return false, nil
+	}
+
 	if len(data.IsolatedDevices) > 0 {
 		return true, nil
 	}
@@ -54,6 +59,19 @@ func (f *IsolatedDevicePredicate) PreExecute(ctx context.Context, u *core.Unit, 
 		}
 	}
 	return false, nil
+}
+
+func (f *IsolatedDevicePredicate) getIsolatedDeviceCountByType(getter core.CandidatePropertyGetter, devType string) int {
+	devs := getter.UnusedIsolatedDevicesByType(devType)
+	if devType != compute.CONTAINER_DEV_NVIDIA_MPS && devType != compute.CONTAINER_DEV_NVIDIA_GPU_SHARE {
+		return len(devs)
+	} else {
+		devMap := map[string]struct{}{}
+		for _, dev := range devs {
+			devMap[dev.DevicePath] = struct{}{}
+		}
+		return len(devMap)
+	}
 }
 
 func (f *IsolatedDevicePredicate) Execute(ctx context.Context, u *core.Unit, c core.Candidater) (bool, []core.PredicateFailureReason, error) {
@@ -116,7 +134,7 @@ func (f *IsolatedDevicePredicate) Execute(ctx context.Context, u *core.Unit, c c
 		}
 	}
 	for devType, reqCount := range devTypeRequest {
-		freeCount := len(getter.UnusedIsolatedDevicesByType(devType))
+		freeCount := f.getIsolatedDeviceCountByType(getter, devType)
 		if freeCount < reqCount {
 			h.Exclude(fmt.Sprintf("IsolatedDevice type %q not enough, request: %d, hostFree: %d", devType, reqCount, freeCount))
 			return h.GetResult()

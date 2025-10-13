@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +58,8 @@ type SSkuResourcesMeta struct {
 	CloudpolicyBase string `json:"cloudpolicy_base"`
 
 	RateBase string `json:"rate_base"`
+	// 汇率转换
+	CurrencyExchangeBase string `json:"currency_exchange_base"`
 
 	// 3天过期, 重新刷新
 	expire time.Time
@@ -103,6 +106,28 @@ func (self *SSkuResourcesMeta) request(url string) (jsonutils.JSONObject, error)
 	return resp, err
 }
 
+func (self *SSkuResourcesMeta) head(url string) (http.Header, jsonutils.JSONObject, error) {
+	client := httputils.GetAdaptiveTimeoutClient()
+
+	header := http.Header{}
+	header.Set("User-Agent", "vendor/yunion-OneCloud@"+version.Get().GitVersion)
+	_header, resp, err := httputils.JSONRequest(client, context.TODO(), httputils.HEAD, url, header, nil, false)
+	return _header, resp, err
+}
+
+func (self *SSkuResourcesMeta) GetCurrencyRate(src, dest string) (float64, error) {
+	url := fmt.Sprintf("%s/%s-%s", self.CurrencyExchangeBase, src, dest)
+	header, _, err := self.head(url)
+	if err != nil {
+		return 0.0, errors.Wrapf(err, "head %s", url)
+	}
+	rate := header.Get("x-oss-meta-rate")
+	if len(rate) == 0 {
+		return 0.0, errors.Wrapf(cloudprovider.ErrNotFound, "x-oss-meta-rate %s -> %s", src, dest)
+	}
+	return strconv.ParseFloat(rate, 64)
+}
+
 func (self *SSkuResourcesMeta) _get(url string) ([]jsonutils.JSONObject, error) {
 	objs, err := self.request(url)
 	if err != nil {
@@ -142,7 +167,7 @@ func (self *SSkuResourcesMeta) Index(resType string) (map[string]string, error) 
 	case "cloudrate":
 		url = fmt.Sprintf("%s/index.json", self.RateBase)
 	default:
-		return nil, errors.Wrapf(cloudprovider.ErrNotFound, resType)
+		return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%v", resType)
 	}
 	ret := map[string]string{}
 	resp, err := self.request(url)
@@ -176,11 +201,11 @@ func (self *SSkuResourcesMeta) List(resType string, regionId string, retVal inte
 	case "cloudpolicy":
 		url = fmt.Sprintf("%s/%s.json", self.CloudpolicyBase, regionId)
 	default:
-		return errors.Wrapf(cloudprovider.ErrNotFound, resType)
+		return errors.Wrapf(cloudprovider.ErrNotFound, "%v", resType)
 	}
 	resp, err := self._get(url)
 	if err != nil {
-		return errors.Wrapf(err, resType)
+		return errors.Wrapf(err, "%v", resType)
 	}
 	return jsonutils.Update(retVal, resp)
 }

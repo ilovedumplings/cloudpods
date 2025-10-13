@@ -31,6 +31,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=alertdashboard
+// +onecloud:swagger-gen-model-plural=alertdashboards
 type SAlertDashBoardManager struct {
 	db.SEnabledResourceBaseManager
 	db.SStatusStandaloneResourceBaseManager
@@ -215,12 +217,10 @@ func (dash *SAlertDashBoard) getJointPanels() ([]SAlertDashboardPanel, error) {
 
 func (dash *SAlertDashBoard) getAttachPanels() ([]SAlertPanel, error) {
 	panels := make([]SAlertPanel, 0)
-	panelQuery := AlertPanelManager.Query()
-	sq := AlertDashBoardPanelManager.Query(AlertDashBoardPanelManager.GetSlaveFieldName()).Equals(
-		AlertDashBoardPanelManager.GetMasterFieldName(), dash.Id).SubQuery()
-	panelQuery = panelQuery.In("id", sq)
-	panelQuery = panelQuery.Desc("created_at")
-	err := db.FetchModelObjects(AlertPanelManager, panelQuery, &panels)
+	q := AlertPanelManager.Query()
+	sq := AlertDashBoardPanelManager.Query().Equals("dashboard_id", dash.Id).SubQuery()
+	q = q.Join(sq, sqlchemy.Equals(q.Field("id"), sq.Field("panel_id"))).Asc(sq.Field("index")).Desc("created_at")
+	err := db.FetchModelObjects(AlertPanelManager, q, &panels)
 	if err != nil {
 		return panels, errors.Wrapf(err, "dashboard:%s get attach panels error", dash.Name)
 	}
@@ -290,6 +290,36 @@ func (dash *SAlertDashBoard) PerformClonePanel(ctx context.Context, userCred mcc
 	return output, nil
 }
 
+func (dash *SAlertDashBoard) PerformSetPanelOrder(
+	ctx context.Context,
+	userCred mcclient.TokenCredential,
+	query jsonutils.JSONObject,
+	input monitor.AlertPanelSetOrderInput,
+) (jsonutils.JSONObject, error) {
+	panels, err := dash.getJointPanels()
+	if err != nil {
+		return nil, errors.Wrapf(err, "getJointPanels")
+	}
+	order := map[string]int{}
+	for _, v := range input.Order {
+		order[v.PanelId] = v.Index
+	}
+	for i := range panels {
+		panel := panels[i]
+		index, ok := order[panel.PanelId]
+		if ok {
+			_, err := db.Update(&panel, func() error {
+				panel.Index = index
+				return nil
+			})
+			if err != nil {
+				return nil, errors.Wrapf(err, "update index")
+			}
+		}
+	}
+	return nil, nil
+}
+
 func (dash *SAlertDashBoard) PerformCloneDashboard(ctx context.Context, userCred mcclient.TokenCredential,
 	query jsonutils.JSONObject, input monitor.AlertCloneDashboardInput) (jsonutils.JSONObject, error) {
 	iModel, err := db.NewModelObject(AlertDashBoardManager)
@@ -313,18 +343,15 @@ func (dash *SAlertDashBoard) PerformCloneDashboard(ctx context.Context, userCred
 		return nil, errors.Wrapf(err, "dashboard:%s getAttachPanels err", dash.Id)
 	}
 	for _, panel := range alertPanels {
-		err := panel.attachDashboard(ctx, iModel.(*SAlertDashBoard).Id)
+		newDashId := iModel.(*SAlertDashBoard).GetId()
+		_, err := panel.ClonePanel(ctx, newDashId, monitor.AlertClonePanelInput{})
 		if err != nil {
-			err := iModel.Delete(ctx, userCred)
-			if err != nil {
-				log.Errorf("delete cloneDashboard:%s err when panel attachDashboard err:%v", input.CloneName, err)
-			}
-			return nil, errors.Wrapf(err, "panel:%s attachCloneDashboard:%s err", panel.Name, input.CloneName)
+			return nil, errors.Wrapf(err, "ClonePanel %s for dashboard %s", panel.GetId(), newDashId)
 		}
 	}
 	boardDetails, err := iModel.(*SAlertDashBoard).GetMoreDetails(monitor.AlertDashBoardDetails{})
 	if err != nil {
-		return nil, errors.Wrap(err, "cloneDashboard getDetails err")
+		return nil, errors.Wrap(err, "GetMoreDetails of dashboard")
 	}
 	output := jsonutils.Marshal(iModel)
 	output.(*jsonutils.JSONDict).Update((jsonutils.Marshal(&boardDetails)))

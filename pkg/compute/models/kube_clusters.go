@@ -42,6 +42,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=cloud_kube_cluster
+// +onecloud:swagger-gen-model-plural=cloud_kube_clusters
 type SKubeClusterManager struct {
 	db.SEnabledStatusInfrasResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -670,6 +672,15 @@ func (manager *SKubeClusterManager) QueryDistinctExtraField(q *sqlchemy.SQuery, 
 			return q, nil
 		}
 
+	}
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SKubeClusterManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
 	}
 	return q, httperrors.ErrNotFound
 }

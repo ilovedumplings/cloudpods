@@ -16,6 +16,7 @@ package conditions
 
 import (
 	gocontext "context"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,11 +67,57 @@ func NewMetricQueryCondition(models []*monitor.AlertCondition) (*MetricQueryCond
 		if err := validators.ValidateToValue(qc.Query.To); err != nil {
 			return nil, errors.Wrapf(err, "validate to value %q", qc.Query.To)
 		}
+		reducer, err := NewAlertReducer(&model.Reducer)
+		if err != nil {
+			return nil, errors.Wrapf(err, "NewAlertReducer")
+		}
+		qc.Reducer = reducer
+		qc.ReducerOrder = model.ReducerOrder
 		qc.setResType()
 		cond.QueryCons = append(cond.QueryCons, *qc)
 	}
 
 	return cond, nil
+}
+
+type queryReducedResultSorter struct {
+	r     *queryResult
+	order monitor.ResultReducerOrder
+}
+
+func newQueryReducedResultSorter(
+	r *queryResult,
+	order monitor.ResultReducerOrder) *queryReducedResultSorter {
+	return &queryReducedResultSorter{
+		r:     r,
+		order: order,
+	}
+}
+
+func (q *queryReducedResultSorter) Len() int {
+	return len(q.r.reducedResult.Result)
+}
+
+func (q *queryReducedResultSorter) Less(i, j int) bool {
+	vi, vj := q.r.reducedResult.Result[i], q.r.reducedResult.Result[j]
+	if q.order == monitor.RESULT_REDUCER_ORDER_ASC {
+		if vi < vj {
+			return true
+		}
+		return false
+	}
+	if vi > vj {
+		return true
+	}
+	return false
+}
+
+func (q *queryReducedResultSorter) Swap(i, j int) {
+	q.r.reducedResult.Result[i], q.r.reducedResult.Result[j] = q.r.reducedResult.Result[j], q.r.reducedResult.Result[i]
+	q.r.series[i], q.r.series[j] = q.r.series[j], q.r.series[i]
+	if len(q.r.metas) > i && len(q.r.metas) > j {
+		q.r.metas[i], q.r.metas[j] = q.r.metas[j], q.r.metas[i]
+	}
 }
 
 func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredential, scope string, skipCheckSeries bool) (*monitor.MetricsQueryResult, error) {
@@ -92,6 +139,15 @@ func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredentia
 		return nil, errors.Wrapf(err, "Can't find default datasource")
 	}
 
+	sortMetrics := func(metrics *queryResult, order monitor.ResultReducerOrder) *queryResult {
+		if metrics.reducedResult != nil && len(metrics.reducedResult.Result) > 0 {
+			s := newQueryReducedResultSorter(metrics, order)
+			sort.Sort(s)
+			return s.r
+		}
+		return metrics
+	}
+
 	queryTSDB := func() (*queryResult, error) {
 		startTime := time.Now()
 
@@ -100,20 +156,38 @@ func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredentia
 			return nil, errors.Wrapf(err, "query.executeQuery from %s", ds.Type)
 		}
 		log.Debugf("query metrics from TSDB %q elapsed: %s", ds.Type, time.Since(startTime))
-		return queryResult, nil
+		if firstCond.Reducer.GetType() != "" {
+			if queryResult.reducedResult == nil {
+				queryResult.reducedResult = &monitor.ReducedResult{
+					Reducer: monitor.Condition{
+						Type:   string(firstCond.Reducer.GetType()),
+						Params: firstCond.Reducer.GetParams(),
+					},
+					Result: make([]float64, len(queryResult.series)),
+				}
+			}
+			for i, ss := range queryResult.series {
+				resultReducerValue, _ := firstCond.Reducer.Reduce(ss)
+				if resultReducerValue != nil {
+					queryResult.reducedResult.Result[i] = *resultReducerValue
+				}
+			}
+		}
+		return sortMetrics(queryResult, firstCond.ReducerOrder), nil
 	}
 
-	if query.noCheckSeries(skipCheckSeries) {
+	noCheck := query.noCheckSeries(skipCheckSeries)
+	if noCheck {
 		qr, err = queryTSDB()
 		if err != nil {
 			return nil, errors.Wrap(err, "queryTSDB")
 		}
-		metrics := monitor.MetricsQueryResult{
-			Series: make(monitor.TimeSeriesSlice, 0),
-			Metas:  qr.metas,
+		metrics := &monitor.MetricsQueryResult{
+			Series:        qr.series,
+			Metas:         qr.metas,
+			ReducedResult: qr.reducedResult,
 		}
-		metrics.Series = qr.series
-		return &metrics, nil
+		return metrics, nil
 	}
 
 	qInfluxdbCh := make(chan bool, 0)
@@ -170,8 +244,9 @@ func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredentia
 	//	metrics.Series = append(metrics.Series, serie)
 	//}
 	metrics := monitor.MetricsQueryResult{
-		Series: make(monitor.TimeSeriesSlice, 0),
-		Metas:  qr.metas,
+		Series:        make(monitor.TimeSeriesSlice, 0),
+		Metas:         qr.metas,
+		ReducedResult: qr.reducedResult,
 	}
 	mtx := sync.Mutex{}
 	workqueue.Parallelize(4, len(qr.series), func(piece int) {
@@ -187,6 +262,7 @@ func (query *MetricQueryCondition) ExecuteQuery(userCred mcclient.TokenCredentia
 	})
 	log.Debugf("fill metrics tag elapsed: %s", time.Since(startTime))
 	log.Debugf("all steps elapsed: %s", time.Since(allStartTime))
+
 	return &metrics, nil
 }
 
@@ -217,7 +293,20 @@ func (query *MetricQueryCondition) noCheckSeries(skipCheckSeries bool) bool {
 			return false
 		}
 	}
+
+	containNoCheckAggregator := false
+	sels := firstCond.Query.Model.Selects
+	lastSel := sels[len(sels)-1]
+	for _, part := range lastSel {
+		if utils.IsInStringArray(part.Type, []string{"sum"}) {
+			containNoCheckAggregator = true
+		}
+	}
+
 	if containGlob {
+		if containNoCheckAggregator {
+			return true
+		}
 		return false
 	}
 	return true

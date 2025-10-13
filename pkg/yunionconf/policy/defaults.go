@@ -18,6 +18,7 @@ import (
 	"yunion.io/x/pkg/util/rbacscope"
 
 	api "yunion.io/x/onecloud/pkg/apis/yunionconf"
+	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
 	common_policy "yunion.io/x/onecloud/pkg/cloudcommon/policy"
 	"yunion.io/x/onecloud/pkg/util/rbacutils"
 )
@@ -32,44 +33,42 @@ const (
 
 var (
 	predefinedDefaultPolicies = []rbacutils.SRbacPolicy{
-		/*
-			{
-				Auth:  true,
-				Scope: rbacscope.ScopeUser,
-				Rules: []rbacutils.SRbacRule{
-					{
-						Service:  api.SERVICE_TYPE,
-						Resource: "parameters",
-						Action:   PolicyActionGet,
-						Result:   rbacutils.Allow,
-					},
-					{
-						Service:  api.SERVICE_TYPE,
-						Resource: "parameters",
-						Action:   PolicyActionList,
-						Result:   rbacutils.Allow,
-					},
-					{
-						Service:  api.SERVICE_TYPE,
-						Resource: "parameters",
-						Action:   PolicyActionCreate,
-						Result:   rbacutils.Allow,
-					},
-					{
-						Service:  api.SERVICE_TYPE,
-						Resource: "parameters",
-						Action:   PolicyActionUpdate,
-						Result:   rbacutils.Allow,
-					},
-					{
-						Service:  api.SERVICE_TYPE,
-						Resource: "parameters",
-						Action:   PolicyActionDelete,
-						Result:   rbacutils.Allow,
-					},
+		{
+			Auth:  true,
+			Scope: rbacscope.ScopeUser,
+			Rules: []rbacutils.SRbacRule{
+				{
+					Service:  api.SERVICE_TYPE,
+					Resource: "parameters",
+					Action:   PolicyActionGet,
+					Result:   rbacutils.Allow,
+				},
+				{
+					Service:  api.SERVICE_TYPE,
+					Resource: "parameters",
+					Action:   PolicyActionList,
+					Result:   rbacutils.Allow,
+				},
+				{
+					Service:  api.SERVICE_TYPE,
+					Resource: "parameters",
+					Action:   PolicyActionCreate,
+					Result:   rbacutils.Allow,
+				},
+				{
+					Service:  api.SERVICE_TYPE,
+					Resource: "parameters",
+					Action:   PolicyActionUpdate,
+					Result:   rbacutils.Allow,
+				},
+				{
+					Service:  api.SERVICE_TYPE,
+					Resource: "parameters",
+					Action:   PolicyActionDelete,
+					Result:   rbacutils.Allow,
 				},
 			},
-		*/
+		},
 		{
 			Auth:  true,
 			Scope: rbacscope.ScopeProject,
@@ -97,6 +96,8 @@ var (
 	}
 )
 
-func init() {
-	common_policy.AppendDefaultPolicies(predefinedDefaultPolicies)
+func Init() {
+	if consts.IsEnableDefaultPolicy() {
+		common_policy.AppendDefaultPolicies(predefinedDefaultPolicies)
+	}
 }

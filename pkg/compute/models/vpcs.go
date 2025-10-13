@@ -337,6 +337,33 @@ func (svpc *SVpc) GetNetworks() ([]SNetwork, error) {
 	return nets, nil
 }
 
+func (svpc *SVpc) GetNetworksByProvider(provider string) ([]SNetwork, error) {
+	q := NetworkManager.Query()
+	wireQ := svpc.getWireQuery()
+	if provider == api.CLOUD_PROVIDER_ONECLOUD {
+		wireQ = wireQ.IsNullOrEmpty("manager_id")
+	} else {
+		account := CloudaccountManager.Query().SubQuery()
+		providers := CloudproviderManager.Query().SubQuery()
+		subq := providers.Query(providers.Field("id"))
+		subq = subq.Join(account, sqlchemy.Equals(
+			account.Field("id"), providers.Field("cloudaccount_id"),
+		))
+		subq = subq.Filter(sqlchemy.Equals(account.Field("provider"), provider))
+		wireQ = wireQ.Filter(sqlchemy.In(wireQ.Field("manager_id"), subq.SubQuery()))
+	}
+
+	wireSubQ := wireQ.SubQuery()
+	q = q.In("wire_id", wireSubQ.Query(wireSubQ.Field("id")).SubQuery())
+
+	nets := make([]SNetwork, 0, 5)
+	err := db.FetchModelObjects(NetworkManager, q, &nets)
+	if err != nil {
+		return nil, errors.Wrap(err, "db.FetchModelObjects")
+	}
+	return nets, nil
+}
+
 func (svpc *SVpc) GetNetworkByExtId(extId string) (*SNetwork, error) {
 	network, err := db.FetchByExternalIdAndManagerId(NetworkManager, extId, func(q *sqlchemy.SQuery) *sqlchemy.SQuery {
 		wireQ := svpc.getWireQuery().SubQuery()
@@ -970,8 +997,8 @@ func (manager *SVpcManager) ValidateCreateData(
 		return input, err
 	}
 
-	if region.GetDriver().IsVpcCreateNeedInputCidr() && len(input.CidrBlock) == 0 {
-		return input, httperrors.NewMissingParameterError("cidr")
+	if region.GetDriver().IsVpcCreateNeedInputCidr() && len(input.CidrBlock) == 0 && len(input.CidrBlock6) == 0 {
+		return input, httperrors.NewMissingParameterError("cidr_block or cidr_block6")
 	}
 
 	keys := GetVpcQuotaKeysFromCreateInput(ownerId, input)
@@ -998,6 +1025,10 @@ func (svpc *SVpc) PostCreate(ctx context.Context, userCred mcclient.TokenCredent
 	}()
 
 	if len(svpc.ManagerId) == 0 {
+		notifyclient.EventNotify(ctx, userCred, notifyclient.SEventNotifyParam{
+			Obj:    svpc,
+			Action: notifyclient.ActionCreate,
+		})
 		return
 	}
 	task, err := taskman.TaskManager.NewTask(ctx, "VpcCreateTask", svpc, userCred, nil, "", "", nil)
@@ -1345,6 +1376,15 @@ func (manager *SVpcManager) QueryDistinctExtraField(q *sqlchemy.SQuery, field st
 		if err == nil {
 			return q, nil
 		}
+	}
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SVpcManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
 	}
 	return q, httperrors.ErrNotFound
 }
@@ -1951,6 +1991,7 @@ func (svpc *SVpc) GetDetailsTopology(ctx context.Context, userCred mcclient.Toke
 			for j := range hns {
 				host.Networks = append(host.Networks, api.HostnetworkTopologyOutput{
 					IpAddr:  hns[j].IpAddr,
+					Ip6Addr: hns[j].Ip6Addr,
 					MacAddr: hns[j].MacAddr,
 				})
 			}
@@ -2005,13 +2046,13 @@ func (self *SVpc) CheckSecurityGroupConsistent(secgroup *SSecurityGroup) error {
 		if secgroup.VpcId != self.Id {
 			return httperrors.NewInvalidStatusError("The security group does not belong to the vpc")
 		}
-	} else if len(secgroup.CloudregionId) > 0 {
-		if secgroup.CloudregionId != self.CloudregionId {
-			return httperrors.NewInvalidStatusError("The security group and vpc are in different areas")
-		}
 	} else if len(secgroup.GlobalvpcId) > 0 {
 		if secgroup.GlobalvpcId != self.GlobalvpcId {
 			return httperrors.NewInvalidStatusError("The security group and vpc are in different global vpc")
+		}
+	} else if len(secgroup.CloudregionId) > 0 {
+		if secgroup.CloudregionId != self.CloudregionId {
+			return httperrors.NewInvalidStatusError("The security group and vpc are in different areas")
 		}
 	}
 	return nil
@@ -2028,7 +2069,7 @@ func (self *SVpc) GetSecurityGroups() ([]SSecurityGroup, error) {
 }
 
 func (self *SVpc) GetDefaultSecurityGroup(ownerId mcclient.IIdentityProvider, filter func(q *sqlchemy.SQuery) *sqlchemy.SQuery) (*SSecurityGroup, error) {
-	q := SecurityGroupManager.Query().Equals("status", api.SECGROUP_STATUS_READY).Like("name", "default%")
+	q := SecurityGroupManager.Query().Equals("status", api.SECGROUP_STATUS_READY).Like("name", "%"+"default"+"%")
 
 	q = filter(q)
 	q = q.Filter(

@@ -78,7 +78,7 @@ func (drv *SBaseGuestDriver) OnGuestCreateTaskComplete(ctx context.Context, gues
 	if len(duration) > 0 {
 		bc, err := billing.ParseBillingCycle(duration)
 		if err == nil && guest.ExpiredAt.IsZero() {
-			guest.SaveRenewInfo(ctx, task.GetUserCred(), &bc, nil, "")
+			models.SaveRenewInfo(ctx, task.GetUserCred(), guest, &bc, nil, "")
 		}
 		if jsonutils.QueryBoolean(task.GetParams(), "auto_prepaid_recycle", false) {
 			err := guest.CanPerformPrepaidRecycle()
@@ -123,6 +123,10 @@ func (drv *SBaseGuestDriver) OnDeleteGuestFinalCleanup(ctx context.Context, gues
 func (drv *SBaseGuestDriver) RequestDetachDisk(ctx context.Context, guest *models.SGuest, disk *models.SDisk, task taskman.ITask) error {
 	task.ScheduleRun(nil)
 	return nil
+}
+
+func (drv *SBaseGuestDriver) RequestChangeBillingType(ctx context.Context, guest *models.SGuest, task taskman.ITask) error {
+	return errors.Wrapf(cloudprovider.ErrNotImplemented, "RequestChangeBillingType")
 }
 
 func (drv *SBaseGuestDriver) RequestAttachDisk(ctx context.Context, guest *models.SGuest, disk *models.SDisk, task taskman.ITask) error {
@@ -170,8 +174,8 @@ func (drv *SBaseGuestDriver) IsRebuildRootSupportChangeUEFI() bool {
 	return true
 }
 
-func (drv *SBaseGuestDriver) GetChangeConfigStatus(guest *models.SGuest) ([]string, error) {
-	return []string{}, fmt.Errorf("This Guest driver dose not implement GetChangeConfigStatus")
+func (drv *SBaseGuestDriver) GetChangeInstanceTypeStatus() ([]string, error) {
+	return []string{}, fmt.Errorf("This Guest driver dose not implement GetChangeInstanceTypeStatus")
 }
 
 func (drv *SBaseGuestDriver) ValidateDetachDisk(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, disk *models.SDisk) error {
@@ -391,11 +395,6 @@ func (drv *SBaseGuestDriver) RequestSyncSecgroupsOnHost(ctx context.Context, gue
 	return nil // do nothing
 }
 
-func (drv *SBaseGuestDriver) CancelExpireTime(
-	ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest) error {
-	return guest.CancelExpireTime(ctx, userCred)
-}
-
 func (drv *SBaseGuestDriver) IsSupportPublicipToEip() bool {
 	return false
 }
@@ -421,11 +420,11 @@ func (drv *SBaseGuestDriver) IsSupportLiveMigrate() bool {
 }
 
 func (drv *SBaseGuestDriver) CheckMigrate(ctx context.Context, guest *models.SGuest, userCred mcclient.TokenCredential, input api.GuestMigrateInput) error {
-	return httperrors.NewNotAcceptableError("Not allow for hypervisor %s", guest.GetHypervisor())
+	return nil
 }
 
 func (drv *SBaseGuestDriver) CheckLiveMigrate(ctx context.Context, guest *models.SGuest, userCred mcclient.TokenCredential, input api.GuestLiveMigrateInput) error {
-	return httperrors.NewNotAcceptableError("Not allow for hypervisor %s", guest.GetHypervisor())
+	return nil
 }
 
 func (drv *SBaseGuestDriver) RequestMigrate(ctx context.Context, guest *models.SGuest, userCred mcclient.TokenCredential, input api.GuestMigrateInput, task taskman.ITask) error {
@@ -507,7 +506,7 @@ func (self *SBaseGuestDriver) QgaRequestGuestInfoTask(ctx context.Context, userC
 	return nil, httperrors.ErrNotImplemented
 }
 
-func (self *SBaseGuestDriver) QgaRequestSetNetwork(ctx context.Context, userCred mcclient.TokenCredential, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) (jsonutils.JSONObject, error) {
+func (self *SBaseGuestDriver) QgaRequestSetNetwork(ctx context.Context, task taskman.ITask, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) (jsonutils.JSONObject, error) {
 	return nil, httperrors.ErrNotImplemented
 }
 
@@ -520,6 +519,10 @@ func (drv *SBaseGuestDriver) QgaRequestGetOsInfo(ctx context.Context, userCred m
 }
 
 func (drv *SBaseGuestDriver) RequestQgaCommand(ctx context.Context, userCred mcclient.TokenCredential, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) (jsonutils.JSONObject, error) {
+	return nil, httperrors.ErrNotImplemented
+}
+
+func (self *SBaseGuestDriver) RequestGuestScreenDump(ctx context.Context, userCred mcclient.TokenCredential, body jsonutils.JSONObject, host *models.SHost, guest *models.SGuest) (jsonutils.JSONObject, error) {
 	return nil, httperrors.ErrNotImplemented
 }
 
@@ -564,9 +567,15 @@ func (base *SBaseGuestDriver) ValidateGuestChangeConfigInput(ctx context.Context
 	confs.Old.VcpuCount = guest.VcpuCount
 	confs.Old.CpuSockets = guest.CpuSockets
 	confs.Old.VmemSize = guest.VmemSize
+	confs.Old.ExtraCpuCount = guest.ExtraCpuCount
+
+	region, err := guest.GetRegion()
+	if err != nil {
+		return nil, err
+	}
 
 	if len(input.InstanceType) > 0 {
-		sku, err := models.ServerSkuManager.FetchSkuByNameAndProvider(input.InstanceType, guest.GetDriver().GetProvider(), true)
+		sku, err := models.ServerSkuManager.FetchSkuByNameAndProvider(input.InstanceType, region.Provider, true)
 		if err != nil {
 			return nil, errors.Wrap(err, "FetchSkuByNameAndProvider")
 		}
@@ -581,6 +590,10 @@ func (base *SBaseGuestDriver) ValidateGuestChangeConfigInput(ctx context.Context
 		} else {
 			confs.VcpuCount = guest.VcpuCount
 		}
+		if input.ExtraCpuCount != nil {
+			confs.ExtraCpuCount = *input.ExtraCpuCount
+		}
+
 		if len(input.VmemSize) > 0 {
 			if !regutils.MatchSize(input.VmemSize) {
 				return nil, httperrors.NewBadRequestError("Memory size %q must be number[+unit], like 256M, 1G or 256", input.VmemSize)
@@ -673,14 +686,14 @@ func (base *SBaseGuestDriver) ValidateGuestChangeConfigInput(ctx context.Context
 	}
 
 	// schedulr forecast
-	schedDesc := guest.ChangeConfToSchedDesc(confs.AddedCpu(), confs.AddedMem(), schedInputDisks)
+	schedDesc := guest.ChangeConfToSchedDesc(confs.AddedCpu(), confs.AddedExtraCpu(), confs.AddedMem(), schedInputDisks)
 	s := auth.GetAdminSession(ctx, options.Options.Region)
 	canChangeConf, res, err := scheduler.SchedManager.DoScheduleForecast(s, schedDesc, 1)
 	if err != nil {
 		return nil, errors.Wrap(err, "SchedManager.DoScheduleForecast")
 	}
 	if !canChangeConf {
-		return nil, httperrors.NewInsufficientResourceError(res.String())
+		return nil, httperrors.NewInsufficientResourceError("%s", res.String())
 	}
 
 	confs.SchedDesc = jsonutils.Marshal(schedDesc)
@@ -690,4 +703,16 @@ func (base *SBaseGuestDriver) ValidateGuestChangeConfigInput(ctx context.Context
 
 func (base *SBaseGuestDriver) ValidateGuestHotChangeConfigInput(ctx context.Context, guest *models.SGuest, confs *api.ServerChangeConfigSettings) (*api.ServerChangeConfigSettings, error) {
 	return confs, nil
+}
+
+func (base *SBaseGuestDriver) BeforeDetachIsolatedDevice(ctx context.Context, cred mcclient.TokenCredential, guest *models.SGuest, dev *models.SIsolatedDevice) error {
+	return nil
+}
+
+func (base *SBaseGuestDriver) BeforeAttachIsolatedDevice(ctx context.Context, cred mcclient.TokenCredential, guest *models.SGuest, dev *models.SIsolatedDevice) error {
+	return nil
+}
+
+func (base *SBaseGuestDriver) RequestUploadGuestStatus(ctx context.Context, guest *models.SGuest, task taskman.ITask) error {
+	return errors.Wrapf(cloudprovider.ErrNotImplemented, "RequestUploadGuestStatus")
 }

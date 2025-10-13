@@ -27,8 +27,10 @@ import (
 	"yunion.io/x/pkg/errors"
 	_ "yunion.io/x/sqlchemy/backends"
 
+	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/apis/identity"
+	"yunion.io/x/onecloud/pkg/appsrv"
 	"yunion.io/x/onecloud/pkg/cloudcommon"
 	common_app "yunion.io/x/onecloud/pkg/cloudcommon/app"
 	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
@@ -47,10 +49,11 @@ import (
 	_ "yunion.io/x/onecloud/pkg/compute/hostdrivers"
 	"yunion.io/x/onecloud/pkg/compute/models"
 	"yunion.io/x/onecloud/pkg/compute/options"
-	_ "yunion.io/x/onecloud/pkg/compute/policy"
+	"yunion.io/x/onecloud/pkg/compute/policy"
 	_ "yunion.io/x/onecloud/pkg/compute/regiondrivers"
 	_ "yunion.io/x/onecloud/pkg/compute/storagedrivers"
-	"yunion.io/x/onecloud/pkg/compute/tasks"
+	_ "yunion.io/x/onecloud/pkg/compute/tasks"
+	cloudaccount_tasks "yunion.io/x/onecloud/pkg/compute/tasks/cloudaccount"
 	"yunion.io/x/onecloud/pkg/controller/autoscaling"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
@@ -61,11 +64,16 @@ func StartService() {
 }
 
 func StartServiceWithJobs(jobs func(cron *cronman.SCronJobManager)) {
+	StartServiceWithJobsAndApp(jobs, nil)
+}
+
+func StartServiceWithJobsAndApp(jobs func(cron *cronman.SCronJobManager), appCllback func(app *appsrv.Application)) {
 	opts := &options.Options
 	commonOpts := &options.Options.CommonOptions
 	baseOpts := &options.Options.BaseOptions
 	dbOpts := &options.Options.DBOptions
 	common_options.ParseOptions(opts, os.Args, "region.conf", api.SERVICE_TYPE)
+	policy.Init()
 
 	if opts.PortV2 > 0 {
 		log.Infof("Port V2 %d is specified, use v2 port", opts.PortV2)
@@ -77,16 +85,16 @@ func StartServiceWithJobs(jobs func(cron *cronman.SCronJobManager)) {
 	})
 	common_options.StartOptionManager(opts, opts.ConfigSyncPeriodSeconds, api.SERVICE_TYPE, api.SERVICE_VERSION, options.OnOptionsChange)
 
-	serviceUrl, err := auth.GetServiceURL(api.SERVER_TYPE_V2, opts.Region, "", identity.EndpointInterfaceInternal)
+	serviceUrl, err := auth.GetServiceURL(apis.SERVICE_TYPE_REGION, opts.Region, "", identity.EndpointInterfaceInternal)
 	if err != nil {
 		log.Fatalf("unable to get service url: %v", err)
 	}
 	log.Infof("serviceUrl: %s", serviceUrl)
 	taskman.SetServiceUrl(serviceUrl)
-	err = taskman.UpdateWorkerCount(opts.TaskWorkerCount)
-	if err != nil {
-		log.Fatalf("failed update task manager worker count %s", err)
-	}
+	// err = taskman.UpdateWorkerCount(opts.TaskWorkerCount)
+	// if err != nil {
+	//	log.Fatalf("failed update task manager worker count %s", err)
+	// }
 
 	err = esxi.InitEsxiConfig(opts.EsxiOptions)
 	if err != nil {
@@ -108,6 +116,9 @@ func StartServiceWithJobs(jobs func(cron *cronman.SCronJobManager)) {
 	cloudcommon.InitDB(dbOpts)
 
 	InitHandlers(app)
+	if appCllback != nil {
+		appCllback(app)
+	}
 
 	db.EnsureAppSyncDB(app, dbOpts, models.InitDB)
 	defer cloudcommon.CloseDB()
@@ -115,7 +126,7 @@ func StartServiceWithJobs(jobs func(cron *cronman.SCronJobManager)) {
 	setInfluxdbRetentionPolicy()
 
 	models.InitSyncWorkers(options.Options.CloudSyncWorkerCount)
-	tasks.InitCloudproviderSyncWorkers(options.Options.CloudProviderSyncWorkerCount)
+	cloudaccount_tasks.InitCloudproviderSyncWorkers(options.Options.CloudProviderSyncWorkerCount)
 
 	var (
 		electObj        *elect.Elect
@@ -146,9 +157,14 @@ func StartServiceWithJobs(jobs func(cron *cronman.SCronJobManager)) {
 	}
 
 	cronFunc := func() {
+		err := taskman.TaskManager.InitializeData()
+		if err != nil {
+			log.Fatalf("TaskManager.InitializeData fail %s", err)
+		}
+
 		cachesync.StartTenantCacheSync(opts.TenantCacheExpireSeconds)
 
-		cron := cronman.InitCronJobManager(true, options.Options.CronJobWorkerCount)
+		cron := cronman.InitCronJobManager(true, options.Options.CronJobWorkerCount, options.Options.TimeZone)
 		cron.AddJobAtIntervals("CleanPendingDeleteServers", time.Duration(opts.PendingDeleteCheckSeconds)*time.Second, models.GuestManager.CleanPendingDeleteServers)
 		cron.AddJobAtIntervals("CleanPendingDeleteDisks", time.Duration(opts.PendingDeleteCheckSeconds)*time.Second, models.DiskManager.CleanPendingDeleteDisks)
 		if opts.PrepaidExpireCheck {
@@ -157,6 +173,7 @@ func StartServiceWithJobs(jobs func(cron *cronman.SCronJobManager)) {
 		if opts.PrepaidAutoRenew {
 			cron.AddJobAtIntervals("AutoRenewPrepaidServers", time.Duration(opts.PrepaidAutoRenewHours)*time.Hour, models.GuestManager.AutoRenewPrepaidServer)
 		}
+
 		cron.AddJobAtIntervals("CleanExpiredPostpaidElasticCaches", time.Duration(opts.PrepaidExpireCheckSeconds)*time.Second, models.ElasticcacheManager.DeleteExpiredPostpaids)
 		cron.AddJobAtIntervals("CleanExpiredPostpaidDBInstances", time.Duration(opts.PrepaidExpireCheckSeconds)*time.Second, models.DBInstanceManager.DeleteExpiredPostpaids)
 		cron.AddJobAtIntervals("CleanExpiredPostpaidServers", time.Duration(opts.PrepaidExpireCheckSeconds)*time.Second, models.GuestManager.DeleteExpiredPostpaidServers)
@@ -179,12 +196,13 @@ func StartServiceWithJobs(jobs func(cron *cronman.SCronJobManager)) {
 		cron.AddJobEveryFewHour("AutoPurgeSplitable", 4, 30, 0, db.AutoPurgeSplitable, false)
 
 		cron.AddJobEveryFewHour("AutoDiskSnapshot", 1, 5, 0, models.DiskManager.AutoDiskSnapshot, false)
+		cron.AddJobEveryFewHour("AutoServerSnapshot", 1, 5, 0, models.InstanceSnapshotManager.AutoServerSnapshot, false)
 		cron.AddJobEveryFewHour("SnapshotsCleanup", 1, 35, 0, models.SnapshotManager.CleanupSnapshots, false)
+		cron.AddJobEveryFewHour("InstanceSnapshotsCleanup", 1, 35, 0, models.InstanceSnapshotManager.CleanupInstanceSnapshots, false)
 
 		cron.AddJobEveryFewHour("AutoCleanImageCache", 1, 5, 0, models.CachedimageManager.AutoCleanImageCaches, false)
 
 		cron.AddJobAtIntervalsWithStartRun("SyncSkus", time.Duration(opts.ServerSkuSyncIntervalMinutes)*time.Minute, models.SyncServerSkus, true)
-		cron.AddJobAtIntervalsWithStartRun("SyncManagedWafGroups", time.Duration(opts.ServerSkuSyncIntervalMinutes)*time.Minute, models.SyncWafGroups, true)
 
 		cron.AddJobEveryFewDays("SyncDBInstanceSkus", opts.SyncSkusDay, opts.SyncSkusHour, 0, 0, models.SyncDBInstanceSkus, true)
 		cron.AddJobEveryFewDays("SyncNatSkus", opts.SyncSkusDay, opts.SyncSkusHour, 0, 0, models.SyncNatSkus, true)
@@ -197,7 +215,12 @@ func StartServiceWithJobs(jobs func(cron *cronman.SCronJobManager)) {
 
 		cron.AddJobEveryFewHour("InspectAllTemplate", 1, 0, 0, models.GuestTemplateManager.InspectAllTemplate, true)
 
-		cron.AddJobEveryFewHour("CheckBillingResourceExpireAt", 1, 0, 0, models.CheckBillingResourceExpireAt, true)
+		cron.AddJobEveryFewHour("CheckBillingResourceExpireAt", opts.ExpiredReleaseNotifyHour, 0, 0, models.CheckBillingResourceExpireAt, false)
+		cron.AddJobEveryFewDays(
+			"CleanRecycleDiskFiles", 1, 3, 0, 0, models.StoragesCleanRecycleDiskfiles, false)
+
+		cron.AddJobAtIntervalsWithStartRun("TaskCleanupJob", time.Duration(options.Options.TaskArchiveIntervalMinutes)*time.Minute, taskman.TaskManager.TaskCleanupJob, true)
+
 		if jobs != nil {
 			jobs(cron)
 		}

@@ -32,11 +32,15 @@ var (
 type ContainerDeviceType string
 
 const (
-	ContainerDeviceTypeCphAMDGPU     ContainerDeviceType = api.CONTAINER_DEV_CPH_AMD_GPU
-	ContainerDeviceTypeCphASOPBinder ContainerDeviceType = api.CONTAINER_DEV_CPH_AOSP_BINDER
-	ContainerNetintCAASIC            ContainerDeviceType = api.CONTAINER_DEV_NETINT_CA_ASIC
-	ContainerNetintCAQuadra          ContainerDeviceType = api.CONTAINER_DEV_NETINT_CA_QUADRA
-	ContainerDeviceTypeNVIDIAGPU     ContainerDeviceType = api.CONTAINER_DEV_NVIDIA_GPU
+	ContainerDeviceTypeCphAMDGPU      ContainerDeviceType = api.CONTAINER_DEV_CPH_AMD_GPU
+	ContainerDeviceTypeCphASOPBinder  ContainerDeviceType = api.CONTAINER_DEV_CPH_AOSP_BINDER
+	ContainerNetintCAASIC             ContainerDeviceType = api.CONTAINER_DEV_NETINT_CA_ASIC
+	ContainerNetintCAQuadra           ContainerDeviceType = api.CONTAINER_DEV_NETINT_CA_QUADRA
+	ContainerDeviceTypeNvidiaGpu      ContainerDeviceType = api.CONTAINER_DEV_NVIDIA_GPU
+	ContainerDeviceTypeNvidiaMps      ContainerDeviceType = api.CONTAINER_DEV_NVIDIA_MPS
+	ContainerDeviceTypeNvidiaGpuShare ContainerDeviceType = api.CONTAINER_DEV_NVIDIA_GPU_SHARE
+	ContainerDeviceTypeAscendNpu      ContainerDeviceType = api.CONTAINER_DEV_ASCEND_NPU
+	ContainerDeviceTypeVastaitechGpu  ContainerDeviceType = api.CONTAINER_DEV_VASTAITECH_GPU
 )
 
 func GetContainerDeviceManager(t ContainerDeviceType) (IContainerDeviceManager, error) {
@@ -67,7 +71,7 @@ type ContainerDeviceConfiguration struct {
 type IContainerDeviceManager interface {
 	GetType() ContainerDeviceType
 	NewDevices(dev *ContainerDevice) ([]IDevice, error)
-	NewContainerDevices(input *hostapi.ContainerCreateInput, dev *hostapi.ContainerDevice) ([]*runtimeapi.Device, error)
+	NewContainerDevices(input *hostapi.ContainerCreateInput, dev *hostapi.ContainerDevice) ([]*runtimeapi.Device, []*runtimeapi.Device, error)
 	ProbeDevices() ([]IDevice, error)
-	GetContainerEnvs(devs []*hostapi.ContainerDevice) []*runtimeapi.KeyValue
+	GetContainerExtraConfigures(devs []*hostapi.ContainerDevice) ([]*runtimeapi.KeyValue, []*runtimeapi.Mount)
 }

@@ -22,6 +22,7 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/httputils"
 
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/hostman/hostutils"
@@ -72,6 +73,12 @@ func (r *SRbdImageCache) Load() error {
 }
 
 func (r *SRbdImageCache) Acquire(ctx context.Context, input api.CacheImageInput, callback func(progress, progressMbps float64, totalSizeMb int64)) error {
+	if err := r.Load(); err == nil {
+		log.Infof("rbd image %s has been cached at pool %s", r.imageId, r.Manager.GetPath())
+		r.imageName = r.imageId
+		return nil
+	}
+
 	input.ImageId = r.imageId
 	localImageCache, err := storageManager.LocalStorageImagecacheManager.AcquireImage(ctx, input, func(progress, progressMbps float64, totalSizeMb int64) {
 		if len(input.ServerId) > 0 {
@@ -87,7 +94,7 @@ func (r *SRbdImageCache) Acquire(ctx context.Context, input api.CacheImageInput,
 		err := procutils.NewRemoteCommandAsFarAsPossible(qemutils.GetQemuImg(),
 			"convert", "-W", "-m", "16", "-O", "raw", localImageCache.GetPath(), r.GetPath()).Run()
 		if err != nil {
-			return errors.Wrapf(err, "convert loca image %s to rbd pool %s at host %s", r.imageId, r.Manager.GetPath(), options.HostOptions.Hostname)
+			return errors.Wrapf(err, "convert local image %s to rbd pool %s at host %s", r.imageId, r.Manager.GetPath(), options.HostOptions.Hostname)
 		}
 		if len(input.ServerId) > 0 {
 			modules.Servers.Update(hostutils.GetComputeSession(context.Background()), input.ServerId, jsonutils.Marshal(map[string]float32{"progress": 100.0}))
@@ -123,7 +130,7 @@ func (r *SRbdImageCache) Remove(ctx context.Context) error {
 	go func() {
 		_, err := modules.Storagecachedimages.Detach(hostutils.GetComputeSession(ctx),
 			r.Manager.GetId(), r.imageId, nil)
-		if err != nil {
+		if err != nil && httputils.ErrorCode(err) != 404 {
 			log.Errorf("Fail to delete host cached image: %s", err)
 		}
 	}()
@@ -134,8 +141,8 @@ func (r *SRbdImageCache) GetDesc() *remotefile.SImageDesc {
 	imageCacheManger := r.Manager.(*SRbdImageCacheManager)
 
 	desc := &remotefile.SImageDesc{
-		Size: -1,
-		Name: r.imageName,
+		SizeMb: -1,
+		Name:   r.imageName,
 	}
 
 	cli, err := imageCacheManger.getCephClient()
@@ -153,7 +160,8 @@ func (r *SRbdImageCache) GetDesc() *remotefile.SImageDesc {
 		log.Errorf("GetInfo fail %s", err)
 		return desc
 	}
-	desc.Size = info.SizeByte / 1024 / 1024
+	desc.SizeMb = info.SizeByte / 1024 / 1024
+	desc.AccessAt = info.AccessTimestamp
 
 	return desc
 }

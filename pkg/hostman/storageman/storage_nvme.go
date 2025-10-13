@@ -38,7 +38,7 @@ func (s *SNVMEStorage) GetAvailSizeMb() int {
 	return s.sizeMB
 }
 
-func (s *SNVMEStorage) GetCapacity() int {
+func (s *SNVMEStorage) GetCapacityMb() int {
 	return s.GetAvailSizeMb()
 }
 
@@ -106,6 +106,10 @@ func (s *SNVMEStorage) DeleteSnapshots(ctx context.Context, params interface{}) 
 	return nil, errors.Errorf("unsupported operation")
 }
 
+func (s *SNVMEStorage) DeleteSnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
+	return nil, errors.Errorf("unsupported operation")
+}
+
 func (s *SNVMEStorage) IsSnapshotExist(diskId, snapshotId string) (bool, error) {
 	return false, errors.Errorf("unsupported operation")
 }
@@ -142,8 +146,8 @@ func (s *SNVMEStorage) SaveToGlance(context.Context, interface{}) (jsonutils.JSO
 	return nil, errors.Errorf("unsupported operation")
 }
 
-func (s *SNVMEStorage) CreateDiskFromSnapshot(context.Context, IDisk, *SDiskCreateByDiskinfo) error {
-	return errors.Errorf("unsupported operation")
+func (s *SNVMEStorage) CreateDiskFromSnapshot(context.Context, IDisk, *SDiskCreateByDiskinfo) (jsonutils.JSONObject, error) {
+	return nil, errors.Errorf("unsupported operation")
 }
 
 func (s *SNVMEStorage) CreateDiskFromExistingPath(context.Context, IDisk, *SDiskCreateByDiskinfo) error {
@@ -193,4 +197,8 @@ func (s *SNVMEStorage) GetComposedName() string {
 	p := strings.ReplaceAll(s.Path, ".", "_")
 	p = strings.ReplaceAll(s.Path, ":", "_")
 	return fmt.Sprintf("host_%s_%s_storage_%s", s.Manager.host.GetMasterIp(), s.StorageType(), p)
+}
+
+func (s *SNVMEStorage) CleanRecycleDiskfiles(ctx context.Context) {
+	log.Infof("SNVMEStorage CleanRecycleDiskfiles do nothing!")
 }

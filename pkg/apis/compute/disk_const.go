@@ -19,6 +19,7 @@ import "yunion.io/x/cloudmux/pkg/apis/compute"
 const (
 	DISK_INIT                = compute.DISK_INIT
 	DISK_REBUILD             = compute.DISK_REBUILD
+	DISK_REBUILD_FAILED      = "rebuild_failed"
 	DISK_ALLOC_FAILED        = compute.DISK_ALLOC_FAILED
 	DISK_STARTALLOC          = "start_alloc"
 	DISK_BACKUP_STARTALLOC   = compute.DISK_BACKUP_STARTALLOC
@@ -83,7 +84,10 @@ var DISK_PREALLOCATIONS = []string{
 	DISK_PREALLOCATION_FULL,
 }
 
-const DISK_META_EXISTING_PATH = "disk_existing_path"
+const (
+	DISK_META_EXISTING_PATH      = "disk_existing_path"
+	DISK_META_LAST_ATTACHED_HOST = "__disk_last_attached_host"
+)
 
 const (
 	DISK_DRIVER_VIRTIO = "virtio"

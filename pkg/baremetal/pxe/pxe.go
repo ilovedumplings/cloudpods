@@ -15,12 +15,14 @@
 package pxe
 
 import (
+	"context"
 	"fmt"
 	"net"
 
 	"yunion.io/x/cloudmux/pkg/apis/compute"
 	"yunion.io/x/jsonutils"
 
+	computeapi "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/cloudcommon/types"
 	"yunion.io/x/onecloud/pkg/mcclient"
 	"yunion.io/x/onecloud/pkg/util/dhcp"
@@ -84,7 +86,7 @@ const (
 type IBaremetalManager interface {
 	GetZoneId() string
 	GetBaremetalByMac(mac net.HardwareAddr) IBaremetalInstance
-	AddBaremetal(desc jsonutils.JSONObject) (IBaremetalInstance, error)
+	AddBaremetal(ctx context.Context, desc jsonutils.JSONObject) (IBaremetalInstance, error)
 	GetClientSession() *mcclient.ClientSession
 }
 
@@ -93,8 +95,8 @@ type IBaremetalInstance interface {
 	GetIPMINic(cliMac net.HardwareAddr) *types.SNic
 	GetPXEDHCPConfig(arch uint16) (*dhcp.ResponseConfig, error)
 	GetDHCPConfig(cliMac net.HardwareAddr) (*dhcp.ResponseConfig, error)
-	InitAdminNetif(cliMac net.HardwareAddr, wireId string, nicType compute.TNicType, netType string, isDoImport bool, ipAddr string) error
-	RegisterNetif(cliMac net.HardwareAddr, wireId string) error
+	InitAdminNetif(ctx context.Context, cliMac net.HardwareAddr, wireId string, nicType compute.TNicType, netType computeapi.TNetworkType, isDoImport bool, ipAddr string) error
+	RegisterNetif(ctx context.Context, cliMac net.HardwareAddr, wireId string) error
 	GetTFTPResponse() string
 }
 

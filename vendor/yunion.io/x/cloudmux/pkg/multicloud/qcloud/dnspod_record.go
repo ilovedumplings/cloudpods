@@ -23,6 +23,7 @@ import (
 
 	api "yunion.io/x/cloudmux/pkg/apis/compute"
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
+	"yunion.io/x/cloudmux/pkg/multicloud"
 )
 
 type SRecordCreateRet struct {
@@ -39,6 +40,7 @@ type SRecordCountInfo struct {
 }
 
 type SDnsRecord struct {
+	multicloud.SDnsRecordBase
 	domain *SDomian
 
 	Line          string `json:"Line"`
@@ -256,6 +258,10 @@ func (self *SDnsRecord) GetPolicyType() cloudprovider.TDnsPolicyType {
 
 func (self *SDnsRecord) Delete() error {
 	return self.domain.client.DeleteDnsRecord(self.GetGlobalId(), self.domain.Name)
+}
+
+func (self *SDnsRecord) GetExtraAddresses() ([]string, error) {
+	return []string{}, nil
 }
 
 func (self *SDnsRecord) GetPolicyValue() cloudprovider.TDnsPolicyValue {

@@ -35,7 +35,6 @@ import (
 // keystone v3删除token API
 //
 // keystone v3删除token API
-//
 func invalidateTokenV3(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	tokenStr := r.Header.Get(api.AUTH_SUBJECT_TOKEN_HEADER)
 	err := invalidateToken(ctx, tokenStr)
@@ -53,7 +52,7 @@ func invalidateToken(ctx context.Context, tokenStr string) error {
 	}
 	token, err := TokenStrDecode(ctx, tokenStr)
 	if err != nil {
-		return httperrors.NewInvalidCredentialError(errors.Wrapf(err, "invalid token").Error())
+		return httperrors.NewInvalidCredentialError("invalid token: %v", err)
 	}
 	if adminToken.GetUserId() != token.UserId && policy.PolicyManager.Allow(rbacscope.ScopeSystem, adminToken, api.SERVICE_TYPE, "tokens", "delete").Result.IsDeny() {
 		return httperrors.NewForbiddenError("%s not allow to delete token", adminToken.GetUserName())
@@ -74,7 +73,6 @@ func invalidateToken(ctx context.Context, tokenStr string) error {
 // keystone v3获取被删除的token的列表API
 //
 // keystone v3获取被删除的token的列表API
-//
 func fetchInvalidTokensV3(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	tokens, err := fetchInvalidTokens(ctx)
 	if err != nil {

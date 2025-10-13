@@ -35,13 +35,15 @@ func InitHandlers(app *appsrv.Application) {
 
 	db.RegistUserCredCacheUpdater()
 
+	taskman.AddTaskHandler(API_VERSION, app)
+
 	db.AddScopeResourceCountHandler(API_VERSION, app)
 
-	taskman.AddTaskHandler(API_VERSION, app)
 	for _, manager := range []db.IModelManager{
 		taskman.TaskManager,
 		taskman.SubTaskManager,
 		taskman.TaskObjectManager,
+		taskman.ArchivedTaskManager,
 
 		db.UserCacheManager,
 		db.TenantCacheManager,
@@ -51,6 +53,8 @@ func InitHandlers(app *appsrv.Application) {
 		models.VerificationManager,
 		models.EventManager,
 		models.EmailQueueStatusManager,
+		models.TopicActionManager,
+		models.TopicResourceManager,
 	} {
 		db.RegisterModelManager(manager)
 	}

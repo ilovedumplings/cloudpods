@@ -16,6 +16,7 @@ package handler
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/gotypes"
 	"yunion.io/x/pkg/util/httputils"
 	"yunion.io/x/pkg/util/printutils"
 	"yunion.io/x/pkg/util/rbacscope"
@@ -34,7 +36,6 @@ import (
 	"yunion.io/x/onecloud/pkg/apigateway/options"
 	policytool "yunion.io/x/onecloud/pkg/apigateway/policy"
 	agapi "yunion.io/x/onecloud/pkg/apis/apigateway"
-	"yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/appsrv"
 	"yunion.io/x/onecloud/pkg/cloudcommon/policy"
 	"yunion.io/x/onecloud/pkg/httperrors"
@@ -44,6 +45,8 @@ import (
 	compute_modules "yunion.io/x/onecloud/pkg/mcclient/modules/compute"
 	modules "yunion.io/x/onecloud/pkg/mcclient/modules/identity"
 	"yunion.io/x/onecloud/pkg/mcclient/modules/notify"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/yunionconf"
+	"yunion.io/x/onecloud/pkg/util/hashcache"
 	"yunion.io/x/onecloud/pkg/util/logclient"
 	"yunion.io/x/onecloud/pkg/util/netutils2"
 	"yunion.io/x/onecloud/pkg/util/seclib2"
@@ -75,6 +78,7 @@ func (h *AuthHandlers) AddMethods() {
 		NewHP(h.handleSsoLogin, "ssologin"),
 		NewHP(h.handleIdpInitSsoLogin, "ssologin", "<idp_id>"),
 		NewHP(h.postLogoutHandler, "logout"),
+		NewHP(h.getScopedPolicyBindings, "scopedpolicybindings"),
 		// oidc auth
 		NewHP(handleOIDCAuth, "oidc", "auth"),
 		NewHP(handleOIDCConfiguration, "oidc", ".well-known", "openid-configuration"),
@@ -213,10 +217,42 @@ func (h *AuthHandlers) getRegions(ctx context.Context, w http.ResponseWriter, re
 	appsrv.SendJSON(w, jsonutils.Marshal(resp))
 }
 
+var (
+	bindingCache = hashcache.NewCache(1024, time.Minute)
+)
+
+func (h *AuthHandlers) getScopedPolicyBindings(ctx context.Context, w http.ResponseWriter, req *http.Request) {
+	_, _params, _ := appsrv.FetchEnv(ctx, w, req)
+	if gotypes.IsNil(_params) {
+		_params = jsonutils.NewDict()
+	}
+	params := _params.(*jsonutils.JSONDict)
+	token, _, err := fetchAuthInfo(ctx, req)
+	if err != nil {
+		httperrors.GeneralServerError(ctx, w, err)
+		return
+	}
+	params.Set("project_id", jsonutils.NewString(token.GetProjectId()))
+	hash := fmt.Sprintf("%x", md5.Sum([]byte(params.String())))
+	cache := bindingCache.Get(hash)
+	if cache != nil {
+		appsrv.SendJSON(w, jsonutils.Marshal(cache))
+		return
+	}
+	s := auth.GetAdminSession(ctx, options.Options.Region)
+	resp, err := yunionconf.ScopedPolicyBindings.List(s, params)
+	if err != nil {
+		httperrors.GeneralServerError(ctx, w, err)
+		return
+	}
+	bindingCache.AtomicSet(hash, resp)
+	appsrv.SendJSON(w, jsonutils.Marshal(resp))
+}
+
 func (h *AuthHandlers) getUser(ctx context.Context, w http.ResponseWriter, req *http.Request) {
 	data, err := getUserInfo(ctx, req)
 	if err != nil {
-		httperrors.NotFoundError(ctx, w, err.Error())
+		httperrors.NotFoundError(ctx, w, "%s", err.Error())
 		return
 	}
 	body := jsonutils.NewDict()
@@ -1068,25 +1104,6 @@ func getUserInfo2(s *mcclient.ClientSession, uid string, pid string, loginIp str
 		item.Add(jsonutils.NewString(ep.Name), "name")
 		item.Add(jsonutils.NewString(ep.Service), "service")
 		menus.Add(item)
-	}
-
-	log.Infof("getUserInfo modules.Hosts.Get")
-	// s2 := auth.GetSession(ctx, token, FetchRegion(req), "v2")
-	params := jsonutils.NewDict()
-	params.Add(jsonutils.NewString("host_type"), "field")
-	params.Add(jsonutils.NewString("system"), "scope")
-	params.Add(jsonutils.JSONTrue, "usable")
-	params.Add(jsonutils.JSONTrue, "show_emulated")
-	cap, err := compute_modules.Hosts.Get(s, "distinct-field", params)
-	if err != nil {
-		log.Errorf("modules.Servers.Get distinct-field fail %s", err)
-	} else {
-		hostTypes, _ := jsonutils.GetStringArray(cap, "host_type")
-		hypervisors := make([]string, len(hostTypes))
-		for i, hostType := range hostTypes {
-			hypervisors[i] = compute.HOSTTYPE_HYPERVISOR[hostType]
-		}
-		data.Add(jsonutils.NewStringArray(hypervisors), "hypervisors")
 	}
 
 	data.Add(menus, "menus")

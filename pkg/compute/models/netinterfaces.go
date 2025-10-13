@@ -54,9 +54,9 @@ type SNetInterface struct {
 	Mtu    int16 `nullable:"true"` // Column(SMALLINT, nullable=True)
 
 	// Bridge名称
-	Bridge string `width:"64" charset:"ascii" nullable:"false"`
+	Bridge string `width:"64" charset:"ascii" nullable:"true"`
 	// 接口名称
-	Interface string `width:"16" charset:"ascii" nullable:"false"`
+	Interface string `width:"64" charset:"ascii" nullable:"true"`
 }
 
 // +onecloud:swagger-gen-ignore
@@ -169,9 +169,12 @@ func (netIf *SNetInterface) hostNetworkToJson(bn *SHostnetwork) *jsonutils.JSOND
 	}
 }*/
 
-func (netIf *SNetInterface) networkToNic(ipAddr string, network *SNetwork, nic *types.SNic) *types.SNic {
+func (netIf *SNetInterface) networkToNic(ipAddr, ip6Addr string, network *SNetwork, nic *types.SNic) *types.SNic {
 	if len(ipAddr) > 0 {
 		nic.IpAddr = ipAddr
+	}
+	if len(ip6Addr) > 0 {
+		nic.Ip6Addr = ip6Addr
 	}
 
 	if network != nil {
@@ -190,6 +193,11 @@ func (netIf *SNetInterface) networkToNic(ipAddr string, network *SNetwork, nic *
 		nic.Masklen = network.GuestIpMask
 		nic.Net = network.Name
 		nic.NetId = network.Id
+
+		nic.Masklen6 = network.GuestIp6Mask
+		if len(network.GuestGateway6) > 0 && regutils.MatchIP6Addr(network.GuestGateway6) {
+			nic.Gateway6 = network.GuestGateway6
+		}
 	}
 
 	return nic
@@ -256,7 +264,7 @@ func (netif *SNetInterface) getBaremetalJsonDesc() *types.SNic {
 	}
 	bn := netif.GetHostNetwork()
 	if bn != nil {
-		nic = netif.networkToNic(bn.IpAddr, bn.GetNetwork(), nic)
+		nic = netif.networkToNic(bn.IpAddr, bn.Ip6Addr, bn.GetNetwork(), nic)
 	}
 	return nic
 }
@@ -288,6 +296,15 @@ func (netIf *SNetInterface) GetCandidateNetworkForIp(ctx context.Context, userCr
 	}
 	log.Infof("ipAddr: %s, netiName: %s, wire: %s", ipAddr, netIf.GetName(), wire.GetName())
 	return wire.GetCandidateNetworkForIp(ctx, userCred, ownerId, scope, ipAddr)
+}
+
+func (netIf *SNetInterface) GetCandidateNetworkForIp6(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope, ip6Addr string) (*SNetwork, error) {
+	wire := netIf.GetWire()
+	if wire == nil {
+		return nil, nil
+	}
+	log.Infof("ip6Addr: %s, netiName: %s, wire: %s", ip6Addr, netIf.GetName(), wire.GetName())
+	return wire.GetCandidateNetworkForIp6(ctx, userCred, ownerId, scope, ip6Addr)
 }
 
 func (netif *SNetInterface) IsUsableServernic() bool {

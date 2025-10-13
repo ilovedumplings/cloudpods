@@ -23,8 +23,8 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
-	"yunion.io/x/pkg/util/filterclause"
 	"yunion.io/x/pkg/util/rbacscope"
+	"yunion.io/x/pkg/util/sets"
 	"yunion.io/x/pkg/util/timeutils"
 	"yunion.io/x/sqlchemy"
 
@@ -32,6 +32,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
+	"yunion.io/x/onecloud/pkg/util/filterclause"
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
@@ -39,16 +40,18 @@ var (
 	AlertRecordManager *SAlertRecordManager
 )
 
+// +onecloud:swagger-gen-model-singular=alertrecord
+// +onecloud:swagger-gen-model-plural=alertrecords
 type SAlertRecordManager struct {
 	db.SEnabledResourceBaseManager
-	db.SStatusStandaloneResourceBaseManager
+	db.SStandaloneAnonResourceBaseManager
 	SMonitorScopedResourceManager
 }
 
 type SAlertRecord struct {
 	//db.SVirtualResourceBase
 	db.SEnabledResourceBase
-	db.SStatusStandaloneResourceBase
+	db.SStandaloneAnonResourceBase
 	SMonitorScopedResource
 
 	AlertId   string               `width:"36" charset:"ascii" nullable:"false" list:"user" create:"required"`
@@ -58,11 +61,12 @@ type SAlertRecord struct {
 	EvalData  jsonutils.JSONObject `list:"user" update:"user" length:"medium"`
 	AlertRule jsonutils.JSONObject `list:"user" update:"user" length:"medium"`
 	ResType   string               `width:"36" list:"user" update:"user"`
+	ResIds    string               `length:"medium" list:"user"`
 }
 
 func init() {
 	AlertRecordManager = &SAlertRecordManager{
-		SStatusStandaloneResourceBaseManager: db.NewStatusStandaloneResourceBaseManager(
+		SStandaloneAnonResourceBaseManager: db.NewStandaloneAnonResourceBaseManager(
 			SAlertRecord{},
 			"alertrecord_tbl",
 			"alertrecord",
@@ -78,7 +82,7 @@ func (manager *SAlertRecordManager) NamespaceScope() rbacscope.TRbacScope {
 }
 
 func (manager *SAlertRecordManager) ListItemExportKeys(ctx context.Context, q *sqlchemy.SQuery, userCred mcclient.TokenCredential, keys stringutils2.SSortedStrings) (*sqlchemy.SQuery, error) {
-	q, err := manager.SStatusStandaloneResourceBaseManager.ListItemExportKeys(ctx, q, userCred, keys)
+	q, err := manager.SStandaloneAnonResourceBaseManager.ListItemExportKeys(ctx, q, userCred, keys)
 	if err != nil {
 		return nil, errors.Wrap(err, "SStatusStandaloneResourceBaseManager.ListItemExportKeys")
 	}
@@ -89,6 +93,10 @@ func (manager *SAlertRecordManager) ListItemExportKeys(ctx context.Context, q *s
 	return q, nil
 }
 
+func (m *SAlertRecordManager) FilterByOwner(ctx context.Context, q *sqlchemy.SQuery, man db.FilterByOwnerProvider, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
+	return m.SMonitorScopedResourceManager.FilterByOwner(ctx, q, man, userCred, ownerId, scope)
+}
+
 func (manager *SAlertRecordManager) ListItemFilter(
 	ctx context.Context, q *sqlchemy.SQuery,
 	userCred mcclient.TokenCredential,
@@ -96,7 +104,7 @@ func (manager *SAlertRecordManager) ListItemFilter(
 ) (*sqlchemy.SQuery, error) {
 	var err error
 
-	q, err = manager.SStandaloneResourceBaseManager.ListItemFilter(ctx, q, userCred, query.StandaloneResourceListInput)
+	q, err = manager.SStandaloneAnonResourceBaseManager.ListItemFilter(ctx, q, userCred, query.StandaloneAnonResourceListInput)
 	if err != nil {
 		return nil, errors.Wrap(err, "SStandaloneResourceBaseManager.ListItemFilter")
 	}
@@ -130,6 +138,9 @@ func (manager *SAlertRecordManager) ListItemFilter(
 	if len(query.ResType) != 0 {
 		q.Filter(sqlchemy.Equals(q.Field("res_type"), query.ResType))
 	}
+	if len(query.ResId) != 0 {
+		q.Filter(sqlchemy.ContainsAny(q.Field("res_ids"), []string{query.ResId}))
+	}
 	if len(query.Filter) != 0 {
 		for i, _ := range query.Filter {
 			if strings.Contains(query.Filter[i], "trigger_time") {
@@ -159,6 +170,35 @@ func (man *SAlertRecordManager) getAlertingRecordQuery() *sqlchemy.SQuery {
 
 }
 
+/*func (man *SAlertRecordManager) CustomizeFilterList(ctx context.Context, q *sqlchemy.SQuery, userCred mcclient.TokenCredential, query jsonutils.JSONObject) (*db.CustomizeListFilters, error) {
+	filters := db.NewCustomizeListFilters()
+
+	input := new(monitor.AlertRecordListInput)
+	if err := query.Unmarshal(input); err != nil {
+		return nil, errors.Wrap(err, "AlertRecordManager.CustomizeFilterList.Unmarshal")
+	}
+	if input.ResId != "" {
+		filters.Append(func(item jsonutils.JSONObject) (bool, error) {
+			evalMatchs := make([]monitor.EvalMatch, 0)
+			if item.Contains("eval_data") {
+				err := item.Unmarshal(&evalMatchs, "eval_data")
+				if err != nil {
+					return false, errors.Wrap(err, "record Unmarshal evalMatchs error")
+				}
+				for _, match := range evalMatchs {
+					for k, v := range match.Tags {
+						if strings.HasSuffix(k, "_id") && v == input.ResId {
+							return true, nil
+						}
+					}
+				}
+			}
+			return false, nil
+		})
+	}
+	return filters, nil
+}*/
+
 func (man *SAlertRecordManager) GetAlertRecord(id string) (*SAlertRecord, error) {
 	obj, err := man.FetchById(id)
 	if err != nil {
@@ -184,7 +224,7 @@ func (manager *SAlertRecordManager) QueryDistinctExtraField(q *sqlchemy.SQuery, 
 		resTypeQuery := MetricMeasurementManager.Query("res_type").Distinct()
 		return resTypeQuery, nil
 	}
-	q, err = manager.SStandaloneResourceBaseManager.QueryDistinctExtraField(q, field)
+	q, err = manager.SStandaloneAnonResourceBaseManager.QueryDistinctExtraField(q, field)
 	if err == nil {
 		return q, nil
 	}
@@ -197,16 +237,16 @@ func (man *SAlertRecordManager) OrderByExtraFields(
 	userCred mcclient.TokenCredential,
 	input monitor.AlertRecordListInput,
 ) (*sqlchemy.SQuery, error) {
-	var err error
+	/*var err error
 
 	q, err = man.SStatusStandaloneResourceBaseManager.OrderByExtraFields(ctx, q, userCred, input.StatusStandaloneResourceListInput)
 	if err != nil {
 		return nil, errors.Wrap(err, "SStandaloneResourceBaseManager.OrderByExtraFields")
 	}
-	q, err = man.SScopedResourceBaseManager.OrderByExtraFields(ctx, q, userCred, input.ScopedResourceBaseListInput)
+	/*q, err = man.SScopedResourceBaseManager.OrderByExtraFields(ctx, q, userCred, input.ScopedResourceBaseListInput)
 	if err != nil {
 		return nil, errors.Wrap(err, "SScopedResourceBaseManager.OrderByExtraFields")
-	}
+	}*/
 	return q, nil
 }
 
@@ -219,36 +259,41 @@ func (man *SAlertRecordManager) FetchCustomizeColumns(
 	isList bool,
 ) []monitor.AlertRecordDetails {
 	rows := make([]monitor.AlertRecordDetails, len(objs))
-	stdRows := man.SStatusStandaloneResourceBaseManager.FetchCustomizeColumns(ctx, userCred, query, objs, fields, isList)
+	stdRows := man.SStandaloneAnonResourceBaseManager.FetchCustomizeColumns(ctx, userCred, query, objs, fields, isList)
 	scopedRows := man.SScopedResourceBaseManager.FetchCustomizeColumns(ctx, userCred, query, objs, fields, isList)
+	alertIds := sets.NewString()
+	records := make([]*SAlertRecord, len(objs))
 	for i := range rows {
 		rows[i] = monitor.AlertRecordDetails{
-			StatusStandaloneResourceDetails: stdRows[i],
-			ScopedResourceBaseInfo:          scopedRows[i],
+			StandaloneAnonResourceDetails: stdRows[i],
+			ScopedResourceBaseInfo:        scopedRows[i],
 		}
-		rows[i], _ = objs[i].(*SAlertRecord).GetMoreDetails(rows[i])
+		record := objs[i].(*SAlertRecord)
+		alertIds.Insert(record.AlertId)
+		records[i] = record
+	}
+
+	alerts := map[string]SCommonAlert{}
+	err := db.FetchModelObjectsByIds(CommonAlertManager, "id", alertIds.List(), &alerts)
+	if err != nil {
+		log.Errorf("FetchModelObjectsByIds common alert error: %v", err)
+		return rows
+	}
+	for i := range rows {
+		if alert, ok := alerts[records[i].AlertId]; ok {
+			rows[i].AlertName = alert.Name
+			rows[i].TriggerTime = records[i].CreatedAt
+		}
+		evalMatches, err := records[i].GetEvalData()
+		if err != nil {
+			continue
+		}
+		for j := range evalMatches {
+			evalMatches[j] = records[i].filterTags(evalMatches[j])
+		}
+		rows[i].ResNum = int64(len(evalMatches))
 	}
 	return rows
-}
-
-func (record *SAlertRecord) GetMoreDetails(out monitor.AlertRecordDetails) (monitor.AlertRecordDetails, error) {
-	evalMatchs := make([]monitor.EvalMatch, 0)
-	if record.EvalData != nil {
-		err := record.EvalData.Unmarshal(&evalMatchs)
-		if err != nil {
-			return out, errors.Wrap(err, "record Unmarshal evalMatchs error")
-		}
-		for i, _ := range evalMatchs {
-			evalMatchs[i] = record.filterTags(evalMatchs[i])
-		}
-		out.ResNum = int64(len(evalMatchs))
-	}
-	commonAlert, _ := CommonAlertManager.GetAlert(record.AlertId)
-	if commonAlert != nil {
-		out.AlertName = commonAlert.GetName()
-	}
-	out.TriggerTime = record.CreatedAt
-	return out, nil
 }
 
 func (record *SAlertRecord) filterTags(match monitor.EvalMatch) monitor.EvalMatch {
@@ -304,6 +349,27 @@ func (record *SAlertRecord) CustomizeCreate(
 			return errors.Wrap(err, "unionEvalMatch error")
 		}
 	}
+	// fill res_ids
+	matches, err := record.GetEvalData()
+	if err != nil {
+		return errors.Wrap(err, "GetEvalData error")
+	}
+	resIds := []string{}
+	for _, match := range matches {
+		for k, v := range match.Tags {
+			switch k {
+			case "vm_id":
+				if record.ResType == monitor.METRIC_RES_TYPE_AGENT || record.ResType == monitor.METRIC_RES_TYPE_GUEST {
+					resIds = append(resIds, v)
+				}
+			case "host_id":
+				if record.ResType == monitor.METRIC_RES_TYPE_HOST {
+					resIds = append(resIds, v)
+				}
+			}
+		}
+	}
+	record.ResIds = strings.Join(resIds, ",")
 	return nil
 }
 
@@ -331,10 +397,10 @@ getNewMatchTag:
 }
 
 func (record *SAlertRecord) PostCreate(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, query jsonutils.JSONObject, data jsonutils.JSONObject) {
-	record.SStatusStandaloneResourceBase.PostCreate(ctx, userCred, ownerId, query, data)
-	err := MonitorResourceManager.UpdateMonitorResourceAttachJoint(ctx, userCred, record)
+	record.SStandaloneAnonResourceBase.PostCreate(ctx, userCred, ownerId, query, data)
+	err := MonitorResourceManager.UpdateMonitorResourceAttachJointByRecord(ctx, userCred, record)
 	if err != nil {
-		log.Errorf("UpdateMonitorResourceAttachJoint error: %v", err)
+		log.Errorf("UpdateMonitorResourceAttachJointByRecord error: %v", err)
 	}
 	if err := GetAlertResourceManager().ReconcileFromRecord(ctx, userCred, ownerId, record); err != nil {
 		log.Errorf("Reconcile from alert record error: %v", err)
@@ -357,7 +423,6 @@ func (manager *SAlertRecordManager) DeleteRecordsOfThirtyDaysAgo(ctx context.Con
 	records := make([]SAlertRecord, 0)
 	query := manager.Query()
 	query = query.LE("created_at", timeutils.MysqlTime(time.Now().Add(-time.Hour*24*30)))
-	log.Errorf("query:%s", query.String())
 	err := db.FetchModelObjects(manager, query, &records)
 	if err != nil {
 		log.Errorf("fetch records ofthirty days ago err:%v", err)
@@ -366,7 +431,7 @@ func (manager *SAlertRecordManager) DeleteRecordsOfThirtyDaysAgo(ctx context.Con
 	for i, _ := range records {
 		err := db.DeleteModel(ctx, userCred, &records[i])
 		if err != nil {
-			log.Errorf("delete expire record:%s err:%v", records[i].GetId(), err)
+			log.Errorf("delete expire record: %s err: %v", records[i].GetId(), err)
 		}
 	}
 }
@@ -378,68 +443,88 @@ func (manager *SAlertRecordManager) GetPropertyTotalAlert(ctx context.Context, u
 	if err != nil {
 		return nil, errors.Wrap(err, "Unmarshal AlertRecordListInput error")
 	}
-	alertRecords, err := manager.getNowAlertingRecord(ctx, userCred, *input)
+	alertRess, err := MonitorResourceAlertManager.GetNowAlertingAlerts(ctx, userCred, input)
 	if err != nil {
 		return nil, errors.Wrap(err, "getNowAlertingRecord error")
 	}
-	if input.Details != nil && *input.Details {
-
-	}
 	alertCountMap := jsonutils.NewDict()
-	for _, record := range alertRecords {
-		evalMatches, err := record.GetEvalData()
-		if err != nil {
-			return nil, errors.Wrapf(err, "get record:%s evalData error", record.GetId())
-		}
-		count := int64(len(evalMatches))
-		if alertCountMap.Contains(record.ResType) {
-			resTypeCount, _ := alertCountMap.Int(record.ResType)
+	for _, res := range alertRess {
+		var count int64 = 1
+		if alertCountMap.Contains(res.ResType) {
+			resTypeCount, _ := alertCountMap.Int(res.ResType)
 			count = count + resTypeCount
 		}
-		alertCountMap.Set(record.ResType, jsonutils.NewInt(count))
+		alertCountMap.Set(res.ResType, jsonutils.NewInt(count))
 	}
 	return alertCountMap, nil
 }
 
-func (manager *SAlertRecordManager) getNowAlertingRecord(ctx context.Context, userCred mcclient.TokenCredential,
-	input monitor.AlertRecordListInput) ([]SAlertRecord, error) {
-	//now := time.Now()
-	//startTime := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 1, now.Location())
-	ownerId, err := manager.FetchOwnerId(ctx, jsonutils.Marshal(&input))
+// 获取过去一天的报警历史分布
+func (manager *SAlertRecordManager) GetPropertyHistoryAlert(
+	ctx context.Context,
+	userCred mcclient.TokenCredential,
+	query jsonutils.JSONObject,
+) (*monitor.AlertRecordHistoryAlert, error) {
+	q := manager.Query().GE("created_at", time.Now().Add(-time.Hour*24)).IsNotEmpty("eval_data").NotEquals("state", monitor.AlertStateOK)
+	alerts := []SAlertRecord{}
+	err := q.All(&alerts)
 	if err != nil {
-		return nil, errors.Wrap(err, "FetchOwnerId error")
+		return nil, errors.Wrap(err, "q.All")
 	}
-	if ownerId == nil {
-		ownerId = userCred
-	}
-	query := manager.Query()
-	query = manager.FilterByOwner(ctx, query, manager, userCred, ownerId, rbacscope.String2Scope(input.Scope))
-	//query = query.GE("created_at", startTime.UTC().Format(timeutils.MysqlTimeFormat))
-	query = query.Equals("state", monitor.AlertStateAlerting)
-	query = query.IsNotNull("res_type").IsNotEmpty("res_type").Desc("created_at")
-
-	if len(input.ResType) != 0 {
-		query = query.Equals("res_type", input.ResType)
-	}
-
-	alertsQuery := CommonAlertManager.Query("id").Equals("state", monitor.AlertStateAlerting).IsTrue("enabled").
-		IsNull("used_by")
-	alertsQuery = CommonAlertManager.FilterByOwner(ctx, alertsQuery, CommonAlertManager, userCred, userCred, rbacscope.String2Scope(input.Scope))
-	alerts := make([]SCommonAlert, 0)
-	records := make([]SAlertRecord, 0)
-	err = db.FetchModelObjects(CommonAlertManager, alertsQuery, &alerts)
-	if err != nil {
-		return nil, err
-	}
+	ret := map[string]map[string]map[string]int64{}
+	domainIds, projectIds := []string{}, []string{}
+	domainMap := map[string]string{}
+	projectMap := map[string]string{}
 	for _, alert := range alerts {
-		tmp := *query
-		recordModel, err := db.NewModelObject(manager)
-		if err != nil {
-			return nil, err
+		if _, ok := ret[alert.DomainId]; !ok {
+			ret[alert.DomainId] = map[string]map[string]int64{}
+			domainIds = append(domainIds, alert.DomainId)
 		}
-		if err := (&tmp).Equals("alert_id", alert.GetId()).First(recordModel); err == nil {
-			records = append(records, *(recordModel.(*SAlertRecord)))
+		if _, ok := ret[alert.DomainId][alert.ProjectId]; !ok {
+			ret[alert.DomainId][alert.ProjectId] = map[string]int64{}
+			projectIds = append(projectIds, alert.ProjectId)
+		}
+		if _, ok := ret[alert.DomainId][alert.ProjectId][alert.ResType]; !ok {
+			ret[alert.DomainId][alert.ProjectId][alert.ResType] = 0
+		}
+		eval := make([]monitor.EvalMatch, 0)
+		err := alert.EvalData.Unmarshal(&eval)
+		if err != nil {
+			continue
+		}
+		ret[alert.DomainId][alert.ProjectId][alert.ResType] += int64(len(eval))
+	}
+	domains := []db.STenant{}
+	err = db.TenantCacheManager.GetDomainQuery().In("id", domainIds).All(&domains)
+	if err != nil {
+		return nil, errors.Wrap(err, "GetDomainQuery.In.All")
+	}
+	for _, domain := range domains {
+		domainMap[domain.Id] = domain.Name
+	}
+
+	projects := []db.STenant{}
+	err = db.TenantCacheManager.GetTenantQuery().In("id", projectIds).All(&projects)
+	if err != nil {
+		return nil, errors.Wrap(err, "GetTenantQuery.In.All")
+	}
+	for _, project := range projects {
+		projectMap[project.Id] = project.Name
+	}
+	result := &monitor.AlertRecordHistoryAlert{}
+	for domainId, projects := range ret {
+		for projectId, resTypes := range projects {
+			for resType, alert := range resTypes {
+				result.Data = append(result.Data, monitor.AlertRecordHistoryAlertData{
+					ProjectId: projectId,
+					Project:   projectMap[projectId],
+					DomainId:  domainId,
+					Domain:    domainMap[domainId],
+					ResType:   resType,
+					ResNum:    alert,
+				})
+			}
 		}
 	}
-	return records, nil
+	return result, nil
 }

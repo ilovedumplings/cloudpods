@@ -42,6 +42,7 @@ func InitHandlers(app *appsrv.Application) {
 	quotas.AddQuotaHandler(&models.IdentityQuotaManager.SQuotaBaseManager, API_VERSION, app)
 
 	usages.AddUsageHandler(API_VERSION, app)
+
 	taskman.AddTaskHandler(API_VERSION, app)
 
 	app_common.ExportOptionsHandlerWithPrefix(app, API_VERSION, &options.Options)
@@ -52,6 +53,8 @@ func InitHandlers(app *appsrv.Application) {
 		taskman.TaskManager,
 		taskman.SubTaskManager,
 		taskman.TaskObjectManager,
+		taskman.ArchivedTaskManager,
+
 		models.SensitiveConfigManager,
 		models.WhitelistedConfigManager,
 		models.IdmappingManager,

@@ -18,14 +18,12 @@ import (
 	"context"
 	"io/ioutil"
 	"net"
-	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"yunion.io/x/log"
-	"yunion.io/x/pkg/util/prometheus"
 	"yunion.io/x/pkg/utils"
 	_ "yunion.io/x/sqlchemy/backends"
 
@@ -106,7 +104,7 @@ func StartService() error {
 	o.Options.EnableDBChecksumTables = false
 	o.Options.DBChecksumSkipInit = true
 
-	return StartServiceWrapper(&dbOpts, commonOpts, func(_ *appsrv.Application) error {
+	return StartServiceWrapper(&dbOpts, commonOpts, func(app *appsrv.Application) error {
 		common_options.StartOptionManager(&o.Options, o.Options.ConfigSyncPeriodSeconds, compute_api.SERVICE_TYPE, compute_api.SERVICE_VERSION, o.OnOptionsChange)
 
 		// gin http framework mode configuration
@@ -119,7 +117,7 @@ func StartService() error {
 		startSched := func() {
 			stopEverything := make(chan struct{})
 			ctx := context.Background()
-			go skuman.Start(utils.ToDuration(o.Options.SkuRefreshInterval))
+			go skuman.Start(ctx, utils.ToDuration(o.Options.SkuRefreshInterval))
 			go schedtag.Start(ctx, utils.ToDuration("30s"))
 
 			for _, f := range []func(ctx context.Context){
@@ -140,11 +138,11 @@ func StartService() error {
 		}
 		startSched()
 		//InitHandlers(app)
-		return startHTTP(&o.Options)
+		return startHTTP(app, &o.Options)
 	})
 }
 
-func startHTTP(opt *o.SchedulerOptions) error {
+func startHTTP(app *appsrv.Application, opt *o.SchedulerOptions) error {
 	gin.DefaultWriter = ioutil.Discard
 
 	router := gin.Default()
@@ -152,13 +150,11 @@ func startHTTP(opt *o.SchedulerOptions) error {
 	router.Use(middleware.ErrorHandler)
 	router.Use(middleware.KeystoneTokenVerifyMiddleware())
 
-	prometheus.InstallHandler(router)
+	// prometheus.InstallHandler(router)
 	schedhandler.InstallHandler(router)
 
-	server := &http.Server{
-		Addr:    net.JoinHostPort(opt.Address, strconv.Itoa(int(opt.Port))),
-		Handler: router,
-	}
+	server := appsrv.InitHTTPServer(app, net.JoinHostPort(opt.Address, strconv.Itoa(int(opt.Port))))
+	server.Handler = router
 
 	log.Infof("Start server on: %s:%d", opt.Address, opt.Port)
 

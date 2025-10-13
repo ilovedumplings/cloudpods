@@ -123,6 +123,8 @@ type IBackend interface {
 	DATE_FORMAT(name string, field IQueryField, format string) IQueryField
 	// INET_ATON
 	INET_ATON(field IQueryField) IQueryField
+	// INET6_ATON
+	INET6_ATON(field IQueryField) IQueryField
 	// AND_Val
 	AND_Val(name string, field IQueryField, v interface{}) IQueryField
 	// OR_Val
@@ -155,6 +157,12 @@ type IBackend interface {
 	UPPER(name string, field IQueryField) IQueryField
 	// DATEDIFF
 	DATEDIFF(unit string, field1, field2 IQueryField) IQueryField
+
+	/////////////////////////////////////////////////////////////////////////////
+	///////////////////// Filters ///////////////////////////////////////////////
+	/////////////////////////////////////////////////////////////////////////////
+
+	Equals(f IQueryField, v interface{}) ICondition
 }
 
 var _driver_tbl = make(map[DBBackendName]IBackend)

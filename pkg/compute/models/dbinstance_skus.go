@@ -40,6 +40,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/yunionmeta"
 )
 
+// +onecloud:swagger-gen-model-singular=dbinstance_sku
+// +onecloud:swagger-gen-model-plural=dbinstance_skus
 type SDBInstanceSkuManager struct {
 	db.SEnabledStatusStandaloneResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -685,9 +687,8 @@ func SyncRegionDBInstanceSkus(ctx context.Context, userCred mcclient.TokenCreden
 		db.Metadata.SetValue(ctx, skuMeta, db.SKU_METADAT_KEY, newMd5, userCred)
 
 		result := DBInstanceSkuManager.SyncDBInstanceSkus(ctx, userCred, &region, xor)
-		msg := result.Result()
-		notes := fmt.Sprintf("sync rds sku for region %s result: %s", region.Name, msg)
-		log.Debugf(notes)
+		notes := fmt.Sprintf("sync rds sku for region %s result: %s", region.Name, result.Result())
+		log.Debugf("%s", notes)
 	}
 
 }

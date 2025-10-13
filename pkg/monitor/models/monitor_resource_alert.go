@@ -16,6 +16,7 @@ package models
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"yunion.io/x/jsonutils"
@@ -46,6 +47,8 @@ func init() {
 	MonitorResourceAlertManager.SetVirtualObject(MonitorResourceAlertManager)
 }
 
+// +onecloud:swagger-gen-model-singular=monitorresourcealert
+// +onecloud:swagger-gen-model-plural=monitorresourcealerts
 type SMonitorResourceAlertManager struct {
 	db.SJointResourceBaseManager
 	SMonitorScopedResourceManager
@@ -58,6 +61,7 @@ type SMonitorResourceAlert struct {
 	AlertId           string               `width:"36" charset:"ascii" list:"user" create:"required" index:"true"`
 	AlertRecordId     string               `width:"36" charset:"ascii" list:"user" update:"user"`
 	ResType           string               `width:"36" charset:"ascii" list:"user" update:"user" json:"res_type"`
+	Metric            string               `width:"36" charset:"ascii" list:"user" create:"required" json:"metric"`
 	AlertState        string               `width:"18" charset:"ascii" default:"init" list:"user" update:"user"`
 	SendState         string               `width:"18" charset:"ascii" default:"ok" list:"user" update:"user"`
 	TriggerTime       time.Time            `list:"user"  update:"user" json:"trigger_time"`
@@ -123,8 +127,14 @@ func (manager *SMonitorResourceAlertManager) GetJoinsByListInput(input monitor.M
 	if len(input.AlertId) != 0 {
 		query.Equals(manager.GetSlaveFieldName(), input.AlertId)
 	}
+	if len(input.Metric) > 0 {
+		query.Equals("metric", input.Metric)
+	}
 	if len(input.JointId) != 0 {
 		query.In("row_id", input.JointId)
+	}
+	if len(input.AlertState) > 0 {
+		query = query.Equals("alert_state", input.AlertState)
 	}
 	err := db.FetchModelObjects(manager, query, &joints)
 	if err != nil {
@@ -133,23 +143,60 @@ func (manager *SMonitorResourceAlertManager) GetJoinsByListInput(input monitor.M
 	return joints, nil
 }
 
-func (obj *SMonitorResourceAlert) UpdateAlertRecordData(record *SAlertRecord, match *monitor.EvalMatch) error {
-	sendState := record.SendState
+func (obj *SMonitorResourceAlert) UpdateAlertRecordData(input *UpdateMonitorResourceAlertInput, match *monitor.EvalMatch) error {
+	sendState := input.SendState
 	if _, ok := match.Tags[monitor.ALERT_RESOURCE_RECORD_SHIELD_KEY]; ok {
 		sendState = monitor.SEND_STATE_SHIELD
 	}
 	if _, err := db.Update(obj, func() error {
-		obj.AlertRecordId = record.GetId()
-		obj.ResType = record.ResType
-		obj.AlertState = record.State
+		if input.AlertRecordId != "" {
+			obj.AlertRecordId = input.AlertRecordId
+		}
+		obj.ResType = input.ResType
+		obj.AlertState = input.AlertState
 		obj.SendState = sendState
-		obj.TriggerTime = record.CreatedAt
+		obj.TriggerTime = input.TriggerTime
+		obj.Metric = match.Metric
 		obj.Data = jsonutils.Marshal(match)
 		return nil
 	}); err != nil {
-		return err
+		return errors.Wrap(err, "db.Update")
 	}
 	return nil
+}
+
+func (obj *SMonitorResourceAlert) GetData() (*monitor.EvalMatch, error) {
+	if obj.Data == nil {
+		return nil, errors.Errorf("data is nil")
+	}
+	match := new(monitor.EvalMatch)
+	if err := obj.Data.Unmarshal(match); err != nil {
+		return nil, errors.Wrap(err, "unmarshal to monitor.EvalMatch")
+	}
+	return match, nil
+}
+
+func (m *SMonitorResourceAlertManager) GetNowAlertingAlerts(ctx context.Context, userCred mcclient.TokenCredential, input *monitor.AlertRecordListInput) ([]SMonitorResourceAlert, error) {
+	ownerId, err := m.FetchOwnerId(ctx, jsonutils.Marshal(&input))
+	if err != nil {
+		return nil, errors.Wrapf(err, "FetchOwnerId by input: %s", jsonutils.Marshal(input))
+	}
+	if ownerId == nil {
+		ownerId = userCred
+	}
+
+	alertsQuery := CommonAlertManager.Query("id").Equals("state", monitor.AlertStateAlerting).IsTrue("enabled").
+		IsNull("used_by")
+	alertsQuery = CommonAlertManager.FilterByOwner(ctx, alertsQuery, CommonAlertManager, userCred, ownerId, rbacscope.String2Scope(input.Scope))
+
+	alertRess := make([]SMonitorResourceAlert, 0)
+	q := m.Query()
+	q = q.Equals("alert_state", monitor.AlertStateAlerting)
+	q = q.In("alert_id", alertsQuery)
+	if err := db.FetchModelObjects(m, q, &alertRess); err != nil {
+		return nil, errors.Wrapf(err, "FetchModelObjects by GetNowAlertingAlerts err")
+	}
+	return alertRess, nil
 }
 
 func (m *SMonitorResourceAlertManager) ListItemFilter(ctx context.Context, q *sqlchemy.SQuery, userCred mcclient.TokenCredential, input *monitor.MonitorResourceJointListInput) (*sqlchemy.SQuery, error) {
@@ -158,21 +205,26 @@ func (m *SMonitorResourceAlertManager) ListItemFilter(ctx context.Context, q *sq
 	if err != nil {
 		return q, errors.Wrap(err, "SJointResourceBaseManager ListItemFilter err")
 	}
+	alertSq := AlertManager.Query("id").SubQuery()
+	q = q.In("alert_id", alertSq)
+	if len(input.AlertState) > 0 {
+		q = q.Equals("alert_state", input.AlertState)
+	}
 	if input.Alerting {
-		q.Equals("alert_state", monitor.AlertStateAlerting)
+		q = q.Equals("alert_state", monitor.AlertStateAlerting)
 		resQ := MonitorResourceManager.Query("res_id")
 		resQ, err = MonitorResourceManager.ListItemFilter(ctx, resQ, userCred, monitor.MonitorResourceListInput{})
 		if err != nil {
 			return q, errors.Wrap(err, "Get monitor in Query err")
 		}
 		resQ = m.SMonitorScopedResourceManager.FilterByOwner(ctx, resQ, m, userCred, userCred, rbacscope.TRbacScope(input.Scope))
-		q.Filter(sqlchemy.In(q.Field("monitor_resource_id"), resQ.SubQuery()))
+		q = q.Filter(sqlchemy.In(q.Field("monitor_resource_id"), resQ.SubQuery()))
 	}
 	if len(input.SendState) != 0 {
-		q.Equals("send_state", input.SendState)
+		q = q.Equals("send_state", input.SendState)
 	}
 	if len(input.ResType) != 0 {
-		q.Equals("res_type", input.ResType)
+		q = q.Equals("res_type", input.ResType)
 	}
 	if len(input.ResName) != 0 {
 		resQ := MonitorResourceManager.Query("res_id")
@@ -181,21 +233,50 @@ func (m *SMonitorResourceAlertManager) ListItemFilter(ctx context.Context, q *sq
 		if err != nil {
 			return q, errors.Wrap(err, "Get monitor in Query err")
 		}
-		q.Filter(sqlchemy.In(q.Field("monitor_resource_id"), resQ.SubQuery()))
+		q = q.Filter(sqlchemy.In(q.Field("monitor_resource_id"), resQ.SubQuery()))
 	}
 	alertQuery := CommonAlertManager.Query("id")
 	alertQuery = m.SMonitorScopedResourceManager.FilterByOwner(ctx, alertQuery, m, userCred, userCred, rbacscope.TRbacScope(input.Scope))
 	if len(input.AlertName) != 0 {
 		CommonAlertManager.FieldListFilter(alertQuery, monitor.CommonAlertListInput{Name: input.AlertName})
-		q.Filter(sqlchemy.In(q.Field(m.GetSlaveFieldName()), alertQuery.SubQuery()))
+		q = q.Filter(sqlchemy.In(q.Field(m.GetSlaveFieldName()), alertQuery.SubQuery()))
 	}
 	if len(input.Level) != 0 {
 		CommonAlertManager.FieldListFilter(alertQuery, monitor.CommonAlertListInput{Level: input.Level})
-		q.Filter(sqlchemy.In(q.Field(m.GetSlaveFieldName()), alertQuery.SubQuery()))
+		q = q.Filter(sqlchemy.In(q.Field(m.GetSlaveFieldName()), alertQuery.SubQuery()))
 	}
-	q.Filter(sqlchemy.In(q.Field(m.GetSlaveFieldName()), alertQuery.SubQuery()))
-	q.Filter(sqlchemy.In(q.Field("alert_record_id"), AlertRecordManager.Query("id").SubQuery()))
+	if len(input.MonitorResourceId) != 0 {
+		q = q.Filter(sqlchemy.Equals(q.Field("monitor_resource_id"), input.MonitorResourceId))
+	}
+	if !input.AllState {
+		q = q.Filter(sqlchemy.In(q.Field(m.GetSlaveFieldName()), alertQuery.SubQuery()))
+		q = q.Filter(sqlchemy.In(q.Field("alert_record_id"), AlertRecordManager.Query("id").SubQuery()))
+	}
 	return q, nil
+}
+
+func (m *SMonitorResourceAlertManager) CustomizeFilterList(ctx context.Context, q *sqlchemy.SQuery, userCred mcclient.TokenCredential, query jsonutils.JSONObject) (*db.CustomizeListFilters, error) {
+	filters := db.NewCustomizeListFilters()
+
+	if query.Contains("ip") {
+		ip, _ := query.GetString("ip")
+		ipF := func(obj jsonutils.JSONObject) (bool, error) {
+			match := new(monitor.EvalMatch)
+			if err := obj.Unmarshal(match, "data"); err != nil {
+				log.Warningf("unmarshal data of object %s: %v", obj, err)
+				return false, nil
+			}
+			if tagIp, ok := match.Tags["ip"]; ok {
+				if strings.Contains(tagIp, ip) {
+					return true, nil
+				}
+			}
+			return false, nil
+		}
+		filters.Append(ipF)
+	}
+
+	return filters, nil
 }
 
 func (man *SMonitorResourceAlertManager) FetchCustomizeColumns(
@@ -214,8 +295,9 @@ func (man *SMonitorResourceAlertManager) FetchCustomizeColumns(
 	return rows
 }
 
-func (obj *SMonitorResourceAlert) getMoreDetails(detail monitor.MonitorResourceJointDetails) monitor.
-	MonitorResourceJointDetails {
+func (obj *SMonitorResourceAlert) getMoreDetails(detail monitor.MonitorResourceJointDetails) monitor.MonitorResourceJointDetails {
+	detail.ResType = obj.ResType
+	detail.ResId = obj.MonitorResourceId
 	resources, err := MonitorResourceManager.GetMonitorResources(monitor.MonitorResourceListInput{ResId: []string{obj.
 		MonitorResourceId}})
 	if err != nil {
@@ -225,9 +307,11 @@ func (obj *SMonitorResourceAlert) getMoreDetails(detail monitor.MonitorResourceJ
 	if len(resources) == 0 {
 		return detail
 	}
-	detail.ResType = resources[0].ResType
+	if detail.ResType == "" {
+		detail.ResType = resources[0].ResType
+	}
 	detail.ResName = resources[0].Name
-	detail.ResId = resources[0].ResId
+	//detail.ResId = resources[0].ResId
 
 	if len(obj.AlertRecordId) != 0 {
 		record, err := AlertRecordManager.GetAlertRecord(obj.AlertRecordId)
@@ -235,8 +319,7 @@ func (obj *SMonitorResourceAlert) getMoreDetails(detail monitor.MonitorResourceJ
 			log.Errorf("get alertRecord:%s err:%v", obj.AlertRecordId, err)
 			return detail
 		}
-		detail.Level = record.Level
-		detail.AlertRule = record.AlertRule
+		//detail.AlertRule = record.AlertRule
 		detail.SendState = record.SendState
 		detail.State = record.State
 	}
@@ -246,13 +329,16 @@ func (obj *SMonitorResourceAlert) getMoreDetails(detail monitor.MonitorResourceJ
 		return detail
 	}
 	detail.AlertName = alert.Name
+	detail.Level = alert.Level
+	silentPeriod, _ := alert.GetSilentPeriod()
+	rule, _ := alert.GetAlertRules(silentPeriod)
+	detail.AlertRule = jsonutils.Marshal(rule)
 
 	now := time.Now()
 	shields, err := AlertRecordShieldManager.GetRecordShields(monitor.AlertRecordShieldListInput{ResId: obj.MonitorResourceId,
 		AlertId: obj.AlertId, EndTime: &now})
 	if err != nil {
-		log.Errorf("SMonitorResourceAlert get GetRecordShields by resId: %s,alertId: %s, err: %v",
-			obj.MonitorResourceId, obj.AlertId, err)
+		log.Errorf("SMonitorResourceAlert get GetRecordShields by resId: %s, alertId: %s, err: %v", obj.MonitorResourceId, obj.AlertId, err)
 		return detail
 	}
 	if len(shields) != 0 {
@@ -275,4 +361,13 @@ func (manager *SMonitorResourceAlertManager) ListItemExportKeys(ctx context.Cont
 
 func (m *SMonitorResourceAlertManager) FilterByOwner(ctx context.Context, q *sqlchemy.SQuery, man db.FilterByOwnerProvider, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, scope rbacscope.TRbacScope) *sqlchemy.SQuery {
 	return q
+}
+
+func (m *SMonitorResourceAlertManager) GetResourceAlert(alertId string, resourceId string, metric string) (*SMonitorResourceAlert, error) {
+	q := m.Query().Equals("alert_id", alertId).Equals("monitor_resource_id", resourceId).Equals("metric", metric)
+	obj := new(SMonitorResourceAlert)
+	if err := q.First(obj); err != nil {
+		return nil, errors.Wrapf(err, "query resource alert by alert_id: %q, resource_id: %q, metric: %q", alertId, resourceId, metric)
+	}
+	return obj, nil
 }

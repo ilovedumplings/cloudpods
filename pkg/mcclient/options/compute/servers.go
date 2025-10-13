@@ -15,24 +15,25 @@
 package compute
 
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"strconv"
 	"strings"
 
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/fileutils"
 	"yunion.io/x/pkg/util/regutils"
 
+	"yunion.io/x/onecloud/pkg/apis/cloudcommon/db"
 	computeapi "yunion.io/x/onecloud/pkg/apis/compute"
 	schedapi "yunion.io/x/onecloud/pkg/apis/scheduler"
 	"yunion.io/x/onecloud/pkg/cloudcommon/cmdline"
 	"yunion.io/x/onecloud/pkg/mcclient/options"
-	"yunion.io/x/onecloud/pkg/util/cgrouputils"
+	"yunion.io/x/onecloud/pkg/util/cgrouputils/cpuset"
 )
 
-var ErrEmtptyUpdate = errors.New("No valid update data")
+var ErrEmtptyUpdate = errors.Error("No valid update data")
 
 type ServerListOptions struct {
 	Zone               string   `help:"Zone ID or Name"`
@@ -44,7 +45,7 @@ type ServerListOptions struct {
 	Gpu                *bool    `help:"Show gpu servers"`
 	Secgroup           string   `help:"Secgroup ID or Name"`
 	AdminSecgroup      string   `help:"AdminSecgroup ID or Name"`
-	Hypervisor         string   `help:"Show server of hypervisor" choices:"kvm|esxi|container|baremetal|aliyun|azure|aws|huawei|ucloud|volcengine|zstack|openstack|google|ctyun|incloudsphere|nutanix|bingocloud|cloudpods|ecloud|jdcloud|remotefile|h3c|hcs|hcso|hcsop|proxmox|ksyun|baidu|cucloud|qingcloud"`
+	Hypervisor         string   `help:"Show server of hypervisor" choices:"kvm|esxi|pod|baremetal|aliyun|azure|aws|huawei|ucloud|volcengine|zstack|openstack|google|ctyun|incloudsphere|nutanix|bingocloud|cloudpods|ecloud|jdcloud|remotefile|h3c|hcs|hcso|hcsop|proxmox|ksyun|baidu|cucloud|qingcloud|sangfor|zettakit|uis|cnware"`
 	Region             string   `help:"Show servers in cloudregion"`
 	WithEip            *bool    `help:"Show Servers with EIP"`
 	WithoutEip         *bool    `help:"Show Servers without EIP"`
@@ -53,7 +54,6 @@ type ServerListOptions struct {
 	UsableServerForEip string   `help:"Eip id or name"`
 	WithoutUserMeta    *bool    `help:"Show Servers without user metadata"`
 	EipAssociable      *bool    `help:"Show Servers can associate with eip"`
-	Group              string   `help:"Instance Group ID or Name"`
 	HostSn             string   `help:"Host SN"`
 	IpAddr             string   `help:"Fileter by ip"`
 	IpAddrs            []string `help:"Fileter by ips"`
@@ -79,7 +79,8 @@ type ServerListOptions struct {
 
 	WithUserMeta *bool `help:"filter by user metadata" negative:"without_user_meta"`
 
-	WithHost *bool `help:"filter guest with host or not" negative:"without_host"`
+	WithHost         *bool  `help:"filter guest with host or not" negative:"without_host"`
+	SnapshotpolicyId string `help:"filter guest with snapshotpolicy or not" json:"snapshotpolicy_id"`
 }
 
 func (o *ServerListOptions) Params() (jsonutils.JSONObject, error) {
@@ -126,6 +127,7 @@ type ServerStartOptions struct {
 	ServerIdsOptions
 
 	QemuVersion string `help:"prefer qemu version" json:"qemu_version"`
+	AutoPrepaid *bool  `help:"Auto convert postpaid to prepaid"`
 }
 
 func (o *ServerStartOptions) Params() (jsonutils.JSONObject, error) {
@@ -252,6 +254,7 @@ type ServerCreateCommonConfig struct {
 	ResourceType   string   `help:"Resource type" choices:"shared|prepaid|dedicated"`
 	Schedtag       []string `help:"Schedule policy, key = aggregate name, value = require|exclude|prefer|avoid" metavar:"<KEY:VALUE>"`
 	Net            []string `help:"Network descriptions" metavar:"NETWORK"`
+	NetPortMapping []string `help:"Network port mapping, e.g. 'index=0,port=80,host_port=8080,protocol=<tcp|udp>,host_port_range=<int>-<int>,remote_ips=x.x.x.x|y.y.y.y'" short-token:"p"`
 	NetSchedtag    []string `help:"Network schedtag description, e.g. '0:<tag>:<strategy>'"`
 	IsolatedDevice []string `help:"Isolated device model or ID" metavar:"ISOLATED_DEVICE"`
 	Project        string   `help:"'Owner project ID or Name" json:"tenant"`
@@ -261,6 +264,7 @@ type ServerCreateCommonConfig struct {
 	Disk descriptions
 	size: 500M, 10G
 	fs: swap, ext2, ext3, ext4, xfs, ntfs, fat, hfsplus
+	fs_features: casefold
 	format: qcow2, raw, docker, iso, vmdk, vmdkflatver1, vmdkflatver2, vmdkflat, vmdksparse, vmdksparsever1, vmdksparsever2, vmdksesparse, vhd
 	driver: virtio, ide, scsi, sata, pvscsi
 	cache_mod: writeback, none, writethrough
@@ -298,6 +302,19 @@ func (o ServerCreateCommonConfig) Data() (*computeapi.ServerConfigs, error) {
 			return nil, err
 		}
 		data.Networks = append(data.Networks, net)
+	}
+	if len(o.NetPortMapping) != 0 {
+		pms, err := cmdline.ParseNetworkConfigPortMappings(o.NetPortMapping)
+		if err != nil {
+			return nil, errors.Wrap(err, "parse network port mapping")
+		}
+		for idx, _ := range pms {
+			if idx >= len(data.Networks) {
+				return nil, errors.Errorf("not found %d network of index", idx)
+			}
+			pm := pms[idx]
+			data.Networks[idx].PortMappings = pm
+		}
 	}
 	for _, ntag := range o.NetSchedtag {
 		idx, tag, err := cmdline.ParseResourceSchedtagConfig(ntag)
@@ -347,13 +364,14 @@ func (o ServerCreateCommonConfig) Data() (*computeapi.ServerConfigs, error) {
 
 type ServerConfigs struct {
 	ServerCreateCommonConfig
-	Hypervisor                   string `help:"Hypervisor type" choices:"kvm|pod|esxi|baremetal|container|aliyun|azure|qcloud|aws|huawei|openstack|ucloud|volcengine|zstack|google|ctyun|incloudsphere|bingocloud|cloudpods|ecloud|jdcloud|remotefile|h3c|hcs|hcso|hcsop|proxmox"`
+	Hypervisor                   string `help:"Hypervisor type" choices:"kvm|pod|esxi|baremetal|container|aliyun|azure|qcloud|aws|huawei|openstack|ucloud|volcengine|zstack|google|ctyun|incloudsphere|bingocloud|cloudpods|ecloud|jdcloud|remotefile|h3c|hcs|hcso|hcsop|proxmox|sangfor|zettakit|uis"`
 	Backup                       bool   `help:"Create server with backup server"`
 	BackupHost                   string `help:"Perfered host where virtual backup server should be created"`
 	AutoSwitchToBackupOnHostDown bool   `help:"Auto switch to backup server on host down"`
 	Daemon                       *bool  `help:"Set as a daemon server" json:"is_daemon"`
 
-	RaidConfig []string `help:"Baremetal raid config" json:"-"`
+	RaidConfig      []string `help:"Baremetal raid config" json:"-"`
+	RootDiskMatcher string   `help:"Baremetal root disk matcher, e.g. 'device=/dev/sdb' 'size=900G' 'size_start=800G,size_end=900G'" json:"-"`
 }
 
 func (o ServerConfigs) Data() (*computeapi.ServerConfigs, error) {
@@ -376,6 +394,13 @@ func (o ServerConfigs) Data() (*computeapi.ServerConfigs, error) {
 			}
 			data.BaremetalDiskConfigs = append(data.BaremetalDiskConfigs, raidConf)
 		}
+	}
+	if len(o.RootDiskMatcher) > 0 {
+		matcher, err := cmdline.ParseBaremetalRootDiskMatcher(o.RootDiskMatcher)
+		if err != nil {
+			return nil, err
+		}
+		data.BaremetalRootDiskMatcher = matcher
 	}
 	return data, nil
 }
@@ -432,6 +457,7 @@ type ServerCreateOptionalOptions struct {
 	Iso              string   `help:"ISO image ID" metavar:"IMAGE_ID" json:"cdrom"`
 	IsoBootIndex     *int8    `help:"Iso bootindex" metavar:"IMAGE_BOOT_INDEX" json:"cdrom_boot_index"`
 	VcpuCount        int      `help:"#CPU cores of VM server, default 1" default:"1" metavar:"<SERVER_CPU_COUNT>" json:"vcpu_count" token:"ncpu"`
+	ExtraCpuCount    int      `help:"Extra allocate cpu count" json:"extra_cpu_count"`
 	InstanceType     string   `help:"instance flavor"`
 	Vga              string   `help:"VGA driver" choices:"std|vmware|cirrus|qxl|virtio"`
 	Vdi              string   `help:"VDI protocool" choices:"vnc|spice"`
@@ -442,7 +468,7 @@ type ServerCreateOptionalOptions struct {
 	EnableCloudInit  bool     `help:"Enable cloud-init service"`
 	NoAccountInit    *bool    `help:"Not reset account password"`
 	AllowDelete      *bool    `help:"Unlock server to allow deleting" json:"-"`
-	ShutdownBehavior string   `help:"Behavior after VM server shutdown" metavar:"<SHUTDOWN_BEHAVIOR>" choices:"stop|terminate"`
+	ShutdownBehavior string   `help:"Behavior after VM server shutdown" metavar:"<SHUTDOWN_BEHAVIOR>" choices:"stop|terminate|stop_release_gpu"`
 	AutoStart        bool     `help:"Auto start server after it is created"`
 	Deploy           []string `help:"Specify deploy files in virtual server file system" json:"-"`
 	DeployTelegraf   bool     `help:"Deploy telegraf agent if guest os is supported"`
@@ -474,7 +500,8 @@ type ServerCreateOptionalOptions struct {
 
 	GuestImageID string `help:"create from guest image, need to specify the guest image id"`
 
-	EncryptKey string `help:"encryption key"`
+	EncryptKey string   `help:"encryption key"`
+	Tags       []string `help:"tags in the form of key=value"`
 }
 
 func (o *ServerCreateOptions) ToScheduleInput() (*schedapi.ScheduleInput, error) {
@@ -638,6 +665,17 @@ func (opts *ServerCreateOptions) Params() (*computeapi.ServerCreateInput, error)
 	if err != nil {
 		return nil, err
 	}
+	meta := map[string]string{}
+	for _, v := range opts.Tags {
+		tag := strings.Split(v, "=")
+		if len(tag) != 2 {
+			return nil, fmt.Errorf("invalid tag %s", v)
+		}
+		prefix := db.USER_TAG_PREFIX
+		k, v := prefix+strings.TrimPrefix(tag[0], prefix), tag[1]
+		meta[k] = v
+	}
+	params.Metadata = meta
 
 	if opts.GenerateName {
 		params.GenerateName = opts.NAME
@@ -673,7 +711,7 @@ type ServerUpdateOptions struct {
 	Desc             string `help:"Description" json:"description"`
 	Boot             string `help:"Boot device" choices:"disk|cdrom"`
 	Delete           string `help:"Lock server to prevent from deleting" choices:"enable|disable" json:"-"`
-	ShutdownBehavior string `help:"Behavior after VM server shutdown" choices:"stop|terminate"`
+	ShutdownBehavior string `help:"Behavior after VM server shutdown" choices:"stop|terminate|stop_release_gpu"`
 	Machine          string `help:"Machine type" choices:"q35|pc"`
 
 	IsDaemon *bool `help:"Daemon server" negative:"no-daemon"`
@@ -715,6 +753,7 @@ type ServerDeleteOptions struct {
 	DeleteSnapshots       *bool `help:"Delete server snapshots"`
 	DeleteDisks           *bool `help:"Delete server disks"`
 	DeleteEip             *bool `help:"Delete eip"`
+	DeleteBastionServer   *bool `help:"Remove from bastion host"`
 }
 
 func (o *ServerDeleteOptions) QueryParams() (jsonutils.JSONObject, error) {
@@ -736,6 +775,7 @@ type ServerDeployOptions struct {
 	Deploy         []string `help:"Specify deploy files in virtual server file system" json:"-"`
 	ResetPassword  bool     `help:"Force reset password"`
 	Password       string   `help:"Default user password"`
+	LoginAccount   string   `help:"Guest login account"`
 	AutoStart      bool     `help:"Auto start server after deployed"`
 	DeployTelegraf bool     `help:"Deploy telegraf if guest os supported"`
 }
@@ -752,6 +792,7 @@ func (opts *ServerDeployOptions) Params() (jsonutils.JSONObject, error) {
 		params.ResetPassword = opts.ResetPassword
 		params.Password = opts.Password
 		params.DeployTelegraf = opts.DeployTelegraf
+		params.LoginAccount = opts.LoginAccount
 	}
 	{
 		deployInfos, err := ParseServerDeployInfoList(opts.Deploy)
@@ -811,6 +852,16 @@ func (o *ServerModifySrcCheckOptions) Description() string {
 	return "Modify src ip, mac check settings"
 }
 
+type ServerDisableAutoMergeSnapshot struct {
+	ServerIdOptions
+
+	DisableAutoMergeSnapshot bool `help:"Disable auto merge snapshots"`
+}
+
+func (o *ServerDisableAutoMergeSnapshot) Params() (jsonutils.JSONObject, error) {
+	return options.StructToParams(o)
+}
+
 type ServerSendKeyOptions struct {
 	ID   string `help:"ID or Name of server" metavar:"Guest" json:"-"`
 	KEYS string `help:"Special keys to send, eg. ctrl, alt, f12, shift, etc, separated by \"-\""`
@@ -855,7 +906,7 @@ type ServerQgaCommand struct {
 	ServerIdOptions
 
 	COMMAND string `help:"qga command"`
-	Timeout int    `help:"qga command execute timeout (ms)"`
+	Timeout int    `help:"qga command execute timeout (s)"`
 }
 
 func (o *ServerQgaCommand) Params() (jsonutils.JSONObject, error) {
@@ -865,7 +916,7 @@ func (o *ServerQgaCommand) Params() (jsonutils.JSONObject, error) {
 type ServerQgaPing struct {
 	ServerIdOptions
 
-	Timeout int `help:"qga command execute timeout (ms)"`
+	Timeout int `help:"qga command execute timeout (s)"`
 }
 
 func (o *ServerQgaPing) Params() (jsonutils.JSONObject, error) {
@@ -984,6 +1035,7 @@ type ServerRebuildRootOptions struct {
 	ImageId       string `help:"New root Image template ID" json:"image_id" token:"image"`
 	Keypair       string `help:"ssh Keypair used for login"`
 	Password      string `help:"Default user password"`
+	LoginAccount  string `help:"Guest login account"`
 	NoAccountInit *bool  `help:"Not reset account password"`
 	AutoStart     *bool  `help:"Auto start server after it is created"`
 	AllDisks      *bool  `help:"Rebuild all disks including data disks"`
@@ -1014,10 +1066,11 @@ func (o *ServerRebuildRootOptions) Description() string {
 
 type ServerChangeConfigOptions struct {
 	ServerIdOptions
-	VcpuCount  *int     `help:"New number of Virtual CPU cores" json:"vcpu_count" token:"ncpu"`
-	CpuSockets *int     `help:"Cpu sockets"`
-	VmemSize   string   `help:"New memory size" json:"vmem_size" token:"vmem"`
-	Disk       []string `help:"Data disk description, from the 1st data disk to the last one, empty string if no change for this data disk"`
+	VcpuCount     *int     `help:"New number of Virtual CPU cores" json:"vcpu_count" token:"ncpu"`
+	ExtraCpuCount *int     `help:"Extra allocate cpu count" json:"extra_cpu_count"`
+	CpuSockets    *int     `help:"Cpu sockets"`
+	VmemSize      string   `help:"New memory size" json:"vmem_size" token:"vmem"`
+	Disk          []string `help:"Data disk description, from the 1st data disk to the last one, empty string if no change for this data disk"`
 
 	InstanceType string `help:"Instance Type, e.g. S2.SMALL2 for qcloud"`
 
@@ -1448,20 +1501,12 @@ type ServerCPUSetOptions struct {
 }
 
 func (o *ServerCPUSetOptions) Params() (jsonutils.JSONObject, error) {
-	sets := cgrouputils.ParseCpusetStr(o.SETS)
-	parts := strings.Split(sets, ",")
-	if len(parts) == 0 {
-		return nil, errors.New(fmt.Sprintf("Invalid cpu sets %q", o.SETS))
+	cpus, err := cpuset.Parse(o.SETS)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse cpuset failed")
 	}
 	input := &computeapi.ServerCPUSetInput{
-		CPUS: make([]int, 0),
-	}
-	for _, s := range parts {
-		sd, err := strconv.Atoi(s)
-		if err != nil {
-			return nil, errors.New(fmt.Sprintf("Not digit part %q", s))
-		}
-		input.CPUS = append(input.CPUS, sd)
+		CPUS: cpus.ToSlice(),
 	}
 	return jsonutils.Marshal(input), nil
 }
@@ -1472,6 +1517,15 @@ type ServerVncOptions struct {
 }
 
 func (o *ServerVncOptions) Params() (jsonutils.JSONObject, error) {
+	return jsonutils.Marshal(o), nil
+}
+
+type ServerScreenDumpOptions struct {
+	ServerIdOptions
+	ObjectName string
+}
+
+func (o *ServerScreenDumpOptions) Params() (jsonutils.JSONObject, error) {
 	return jsonutils.Marshal(o), nil
 }
 
@@ -1494,6 +1548,16 @@ func (o *ServerAddSubIpsOptions) Params() (jsonutils.JSONObject, error) {
 	return jsonutils.Marshal(o), nil
 }
 
+type ServerUpdateSubIpsOptions struct {
+	ServerIdOptions
+
+	computeapi.GuestUpdateSubIpsInput
+}
+
+func (o *ServerUpdateSubIpsOptions) Params() (jsonutils.JSONObject, error) {
+	return jsonutils.Marshal(o), nil
+}
+
 type ServerSetOSInfoOptions struct {
 	ServerIdsOptions
 
@@ -1502,4 +1566,26 @@ type ServerSetOSInfoOptions struct {
 
 func (o *ServerSetOSInfoOptions) Params() (jsonutils.JSONObject, error) {
 	return jsonutils.Marshal(o), nil
+}
+
+type ServerSetRootDiskMatcher struct {
+	ROOTDISKMATCHER string `help:"Baremetal root disk matcher, e.g. 'device=/dev/sdb' 'size=900G' 'size_start=800G,size_end=900G'" json:"-"`
+	ServerIdsOptions
+}
+
+func (o *ServerSetRootDiskMatcher) Params() (jsonutils.JSONObject, error) {
+	matcher, err := cmdline.ParseBaremetalRootDiskMatcher(o.ROOTDISKMATCHER)
+	if err != nil {
+		return nil, err
+	}
+	return jsonutils.Marshal(matcher), nil
+}
+
+type ServerChangeBillingTypeOptions struct {
+	ServerIdOptions
+	BillingType string `choices:"prepaid|postpaid"`
+}
+
+func (o *ServerChangeBillingTypeOptions) Params() (jsonutils.JSONObject, error) {
+	return jsonutils.Marshal(map[string]string{"billing_type": o.BillingType}), nil
 }

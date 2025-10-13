@@ -47,7 +47,7 @@ var (
 	CommonAlertReducerFieldOpts = []string{"/"}
 	CommonAlertNotifyTypes      = []string{"email", "mobile", "dingtalk", "webconsole", "feishu"}
 
-	ConditionTypes = []string{"query", "nodata_query"}
+	ConditionTypes = []string{"query", monitor.METRIC_QUERY_TYPE_NO_DATA}
 )
 
 func ValidateAlertCreateInput(input monitor.AlertCreateInput) error {
@@ -123,6 +123,11 @@ func ValidateSelectOfMetricQuery(input monitor.AlertQuery) error {
 	for _, sel := range input.Model.Selects {
 		if len(sel) == 0 {
 			return httperrors.NewInputParameterError("select for nothing in query")
+		}
+	}
+	if input.ResultReducer != nil {
+		if !monitor.ValidateReducerTypes.Has(input.ResultReducer.Type) {
+			return httperrors.NewInputParameterError("invalid result reducer type %s", input.ResultReducer.Type)
 		}
 	}
 	return nil

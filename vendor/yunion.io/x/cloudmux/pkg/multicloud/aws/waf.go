@@ -64,6 +64,50 @@ type SWebAcl struct {
 	LockToken string
 }
 
+func (self *SWebAcl) GetIsAccessProduct() bool {
+	return false
+}
+
+func (self *SWebAcl) GetAccessHeaders() []string {
+	return []string{}
+}
+
+func (self *SWebAcl) GetHttpPorts() []int {
+	return []int{}
+}
+
+func (self *SWebAcl) GetHttpsPorts() []int {
+	return []int{}
+}
+
+func (self *SWebAcl) GetCname() string {
+	return ""
+}
+
+func (self *SWebAcl) GetCertId() string {
+	return ""
+}
+
+func (self *SWebAcl) GetCertName() string {
+	return ""
+}
+
+func (self *SWebAcl) GetUpstreamScheme() string {
+	return ""
+}
+
+func (self *SWebAcl) GetUpstreamPort() int {
+	return 0
+}
+
+func (self *SWebAcl) GetSourceIps() []string {
+	return []string{}
+}
+
+func (self *SWebAcl) GetCcList() []string {
+	return []string{}
+}
+
 func (self *SRegion) ListWebACLs(scope string) ([]SWebAcl, error) {
 	if scope == SCOPE_CLOUDFRONT && self.RegionId != "us-east-1" {
 		return []SWebAcl{}, nil
@@ -103,7 +147,7 @@ func (self *SRegion) GetWebAcl(id, name, scope string) (*SWebAcl, error) {
 	resp, err := client.GetWebACL(&input)
 	if err != nil {
 		if _, ok := err.(*wafv2.WAFNonexistentItemException); ok {
-			return nil, errors.Wrapf(cloudprovider.ErrNotFound, err.Error())
+			return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", err.Error())
 		}
 		return nil, errors.Wrapf(err, "GetWebAcl")
 	}

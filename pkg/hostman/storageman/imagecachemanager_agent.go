@@ -27,6 +27,7 @@ import (
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 
+	api "yunion.io/x/onecloud/pkg/apis/compute"
 	comapi "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/lockman"
 	"yunion.io/x/onecloud/pkg/hostman/hostutils"
@@ -149,7 +150,9 @@ func (c *SAgentImageCacheManager) prefetchImageCacheByCopy(ctx context.Context, 
 func (c *SAgentImageCacheManager) prefetchImageCacheByUpload(ctx context.Context, data *sImageCacheData,
 	origin *jsonutils.JSONDict) (jsonutils.JSONObject, error) {
 
-	localImage, err := c.imageCacheManger.PrefetchImageCache(ctx, origin)
+	input := api.CacheImageInput{}
+	origin.Unmarshal(&input)
+	localImage, err := c.imageCacheManger.PrefetchImageCache(ctx, input)
 	if err != nil {
 		return nil, err
 	}
@@ -196,9 +199,9 @@ func (c *SAgentImageCacheManager) prefetchImageCacheByUpload(ctx context.Context
 	log.Debugf("exist: %t, remotePath: %s", exists, remotePath)
 	if !exists || data.IsForce {
 		if format == "iso" {
-			err := ds.ImportISO(ctx, localImgPath, remotePath, host)
+			err := ds.ImportISO(ctx, localImgPath, remotePath)
 			if err != nil {
-				return nil, errors.Wrap(err, "SDatastore.ImportISO")
+				return nil, errors.Wrapf(err, "SDatastore.ImportISO %s -> %s", localImage, remotePath)
 			}
 		} else {
 			err := ds.ImportVMDK(ctx, localImgPath, remotePath, host)

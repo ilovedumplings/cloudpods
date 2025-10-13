@@ -40,17 +40,23 @@ type SImageOptions struct {
 
 	TorrentClientPath string `help:"path to torrent executable" default:"/opt/yunion/bin/torrent"`
 
+	DefaultImageServiceHomeDir string `help:"Default image service home dir" default:"/opt/cloud/workspace/data/glance"`
+
 	// DeployServerSocketPath string `help:"Deploy server listen socket path" default:"/var/run/onecloud/deploy.sock"`
 
 	StorageDriver string `help:"image backend storage" default:"local" choices:"s3|local"`
 
-	S3AccessKey        string `help:"s3 access key"`
-	S3SecretKey        string `help:"s3 secret key"`
-	S3Endpoint         string `help:"s3 endpoint"`
-	S3UseSSL           bool   `help:"s3 access use ssl"`
-	S3BucketName       string `help:"s3 bucket name" default:"onecloud-images"`
 	S3MountPoint       string `help:"s3fs mount point" default:"/opt/cloud/workspace/data/glance/s3images"`
 	S3CheckImageStatus bool   `help:"Enable s3 check image status"`
+	S3SignVersion      string `help:"signing version"`
+	S3UploadPartSizeMb int64  `help:"s3 upload part size in MB, default to 50MB" default:"50"`
+	S3UploadParallel   int    `help:"s3 upload parallel count" default:"4"`
+
+	S3DirectDownload bool `help:"enable s3 direct download" default:"true"`
+
+	ImageStreamWorkerCount int `help:"Image stream worker count" default:"10"`
+
+	VerifyImageStatusIntervalMinutes int `help:"verify image status periodically, default 15 minutes" default:"15"`
 }
 
 var (
@@ -77,4 +83,8 @@ func OnOptionsChange(oldO, newO interface{}) bool {
 	}
 
 	return changed
+}
+
+func (opt SImageOptions) HasValidS3Options() bool {
+	return len(opt.S3Endpoint) > 0 && len(opt.S3AccessKey) > 0 && len(opt.S3SecretKey) > 0 && len(opt.S3BucketName) > 0
 }

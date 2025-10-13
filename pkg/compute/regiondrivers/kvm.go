@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/jsonutils"
@@ -517,8 +518,14 @@ func (self *SKVMRegionDriver) RequestDeleteLoadbalancerListenerRule(ctx context.
 }
 
 func (self *SKVMRegionDriver) ValidateCreateVpcData(ctx context.Context, userCred mcclient.TokenCredential, input api.VpcCreateInput) (api.VpcCreateInput, error) {
-	if !utils.IsInStringArray(input.CidrBlock, []string{"192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"}) {
+	if len(input.CidrBlock) > 0 && !utils.IsInStringArray(input.CidrBlock, []string{"192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"}) {
 		return input, httperrors.NewInputParameterError("Invalid cidr_block, want 192.168.0.0/16|10.0.0.0/8|172.16.0.0/12, got %s", input.CidrBlock)
+	}
+	if len(input.CidrBlock6) > 0 {
+		input.CidrBlock6 = strings.ToLower(input.CidrBlock6)
+		if !strings.HasPrefix(input.CidrBlock6, "fd") {
+			return input, httperrors.NewInputParameterError("Invalid ipv6 cidr_block, %s outside of IPv6 private unicast address range fd00::/8", input.CidrBlock6)
+		}
 	}
 	return input, nil
 }
@@ -655,9 +662,15 @@ func (self *SKVMRegionDriver) RequestDeleteInstanceSnapshot(ctx context.Context,
 	}
 
 	params := jsonutils.NewDict()
+	taskParams := task.GetParams()
+	var deleteSnapshotTotalCnt int64 = 1
+	if taskParams.Contains("snapshot_total_count") {
+		deleteSnapshotTotalCnt, _ = taskParams.Int("snapshot_total_count")
+	}
+	deletedSnapshotCnt := deleteSnapshotTotalCnt - int64(len(snapshots))
 	params.Set("del_snapshot_id", jsonutils.NewString(snapshots[0].Id))
 	task.SetStage("OnKvmSnapshotDelete", params)
-	err = snapshots[0].StartSnapshotDeleteTask(ctx, task.GetUserCred(), false, task.GetTaskId())
+	err = snapshots[0].StartSnapshotDeleteTask(ctx, task.GetUserCred(), false, task.GetTaskId(), int(deleteSnapshotTotalCnt), int(deletedSnapshotCnt))
 	if err != nil {
 		return err
 	}
@@ -798,7 +811,7 @@ func (self *SKVMRegionDriver) RequestCreateInstanceSnapshot(ctx context.Context,
 
 		return models.SnapshotManager.CreateSnapshot(
 			ctx, task.GetUserCred(), api.SNAPSHOT_MANUAL, disks[diskIndex].DiskId,
-			guest.Id, "", snapshotName, -1, false)
+			guest.Id, "", snapshotName, -1, false, "")
 	}()
 	if err != nil {
 		return err
@@ -881,7 +894,12 @@ func (self *SKVMRegionDriver) RequestSyncDiskStatus(ctx context.Context, userCre
 		originStatus, _ := task.GetParams().GetString("origin_status")
 		status, _ := res.GetString("status")
 		if status == api.DISK_EXIST {
-			if originStatus == api.DISK_UNKNOWN {
+			if utils.IsInArray(originStatus, []string{
+				api.DISK_UNKNOWN,
+				api.DISK_REBUILD_FAILED,
+				api.DISK_ATTACHING,
+				api.DISK_DETACHING,
+			}) {
 				diskStatus = api.DISK_READY
 			} else {
 				diskStatus = originStatus
@@ -940,17 +958,11 @@ func (self *SKVMRegionDriver) RequestPackInstanceBackup(ctx context.Context, ib 
 	if err != nil {
 		return errors.Wrap(err, "unable to get backups")
 	}
-	storage, err := backups[0].GetStorage()
+	host, err := models.HostManager.GetEnabledKvmHostForDiskBackup(&backups[0])
 	if err != nil {
-		return errors.Wrapf(err, "GetStorage")
+		return errors.Wrap(err, "GetEnabledKvmHostForDiskBackup")
 	}
-	host, _ := storage.GetMasterHost()
-	if host == nil {
-		host, err = models.HostManager.GetEnabledKvmHost()
-		if err != nil {
-			return errors.Wrap(err, "unable to GetEnabledKvmHost")
-		}
-	}
+
 	backupIds := make([]string, len(backups))
 	for i := range backupIds {
 		backupIds[i] = backups[i].GetId()
@@ -984,7 +996,7 @@ func (self *SKVMRegionDriver) RequestUnpackInstanceBackup(ctx context.Context, i
 	if err != nil {
 		return errors.Wrap(err, "unable to get backupStorage")
 	}
-	host, err := models.HostManager.GetEnabledKvmHost()
+	host, err := models.HostManager.GetEnabledKvmHostForBackupStorage(backupStorage)
 	if err != nil {
 		return errors.Wrap(err, "unable to GetEnabledKvmHost")
 	}
@@ -1011,9 +1023,9 @@ func (self *SKVMRegionDriver) RequestUnpackInstanceBackup(ctx context.Context, i
 
 func (self *SKVMRegionDriver) RequestSyncBackupStorageStatus(ctx context.Context, userCred mcclient.TokenCredential, bs *models.SBackupStorage, task taskman.ITask) error {
 	taskman.LocalTaskRun(task, func() (jsonutils.JSONObject, error) {
-		host, err := models.HostManager.GetEnabledKvmHost()
+		host, err := models.HostManager.GetEnabledKvmHostForBackupStorage(bs)
 		if err != nil {
-			return nil, errors.Wrap(err, "unable to GetEnabledKvmHost")
+			return nil, errors.Wrap(err, "GetEnabledKvmHostForBackupStorage")
 		}
 		url := fmt.Sprintf("%s/storages/sync-backup-storage", host.ManagerUri)
 		body := jsonutils.NewDict()
@@ -1083,7 +1095,7 @@ func (self *SKVMRegionDriver) RequestSyncDiskBackupStatus(ctx context.Context, u
 		if err != nil {
 			return nil, errors.Wrap(err, "unable to get backupStorage")
 		}
-		storage, _ := backup.GetStorage()
+		/*storage, _ := backup.GetStorage()
 		var host *models.SHost
 		if storage != nil {
 			host, _ = storage.GetMasterHost()
@@ -1093,6 +1105,10 @@ func (self *SKVMRegionDriver) RequestSyncDiskBackupStatus(ctx context.Context, u
 			if err != nil {
 				return nil, errors.Wrap(err, "unable to GetEnabledKvmHost")
 			}
+		}*/
+		host, err := models.HostManager.GetEnabledKvmHostForDiskBackup(backup)
+		if err != nil {
+			return nil, errors.Wrap(err, "GetEnabledKvmHostForDiskBackup")
 		}
 		log.Infof("host: %s, ManagerUri: %s", host.GetId(), host.ManagerUri)
 		url := fmt.Sprintf("%s/storages/sync-backup", host.ManagerUri)
@@ -1300,17 +1316,11 @@ func (self *SKVMRegionDriver) RequestDeleteBackup(ctx context.Context, backup *m
 	if err != nil {
 		return errors.Wrap(err, "unable to get backupStorage")
 	}
-	storage, _ := backup.GetStorage()
-	var host *models.SHost
-	if storage != nil {
-		host, _ = storage.GetMasterHost()
+	host, err := models.HostManager.GetEnabledKvmHostForDiskBackup(backup)
+	if err != nil {
+		return errors.Wrap(err, "GetEnabledKvmHostForDiskBackup")
 	}
-	if host == nil {
-		host, err = models.HostManager.GetEnabledKvmHost()
-		if err != nil {
-			return errors.Wrap(err, "unable to GetEnabledKvmHost")
-		}
-	}
+
 	url := fmt.Sprintf("%s/storages/delete-backup", host.ManagerUri)
 	body := jsonutils.NewDict()
 	body.Set("backup_id", jsonutils.NewString(backup.GetId()))
@@ -1345,10 +1355,18 @@ func (self *SKVMRegionDriver) RequestCreateBackup(ctx context.Context, backup *m
 	if err != nil {
 		return errors.Wrap(err, "unable to get storage")
 	}
+	snapshotObj, err := models.SnapshotManager.FetchById(snapshotId)
+	if err != nil {
+		return errors.Wrap(err, "fetch snapshot")
+	}
+	snapshot := snapshotObj.(*models.SSnapshot)
 	host, _ := guest.GetHost()
 	url := fmt.Sprintf("%s/disks/%s/backup/%s", host.ManagerUri, storage.Id, disk.Id)
 	body := jsonutils.NewDict()
 	body.Set("snapshot_id", jsonutils.NewString(snapshotId))
+	if snapshot.Location != "" {
+		body.Set("snapshot_location", jsonutils.NewString(snapshot.Location))
+	}
 	body.Set("backup_id", jsonutils.NewString(backup.GetId()))
 	body.Set("backup_storage_id", jsonutils.NewString(backupStorage.GetId()))
 	accessInfo, err := backupStorage.GetAccessInfo()

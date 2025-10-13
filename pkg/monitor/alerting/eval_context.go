@@ -17,11 +17,13 @@ package alerting
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
+	"yunion.io/x/pkg/util/sets"
 
 	"yunion.io/x/onecloud/pkg/apis/monitor"
 	"yunion.io/x/onecloud/pkg/mcclient"
@@ -43,7 +45,6 @@ type EvalContext struct {
 	StartTime          time.Time
 	EndTime            time.Time
 	Rule               *Rule
-	//RuleDescription    *RuleDescription
 
 	NoDataFound    bool
 	PrevAlertState monitor.AlertStateType
@@ -52,19 +53,16 @@ type EvalContext struct {
 	UserCred mcclient.TokenCredential
 }
 
-type RuleDescription struct {
-	monitor.AlertRecordRule
-}
-
 // NewEvalContext is the EvalContext constructor.
 func NewEvalContext(alertCtx context.Context, userCred mcclient.TokenCredential, rule *Rule) *EvalContext {
 	return &EvalContext{
-		Ctx:            alertCtx,
-		UserCred:       userCred,
-		StartTime:      time.Now(),
-		Rule:           rule,
-		EvalMatches:    make([]*monitor.EvalMatch, 0),
-		PrevAlertState: rule.State,
+		Ctx:                alertCtx,
+		UserCred:           userCred,
+		StartTime:          time.Now(),
+		Rule:               rule,
+		EvalMatches:        make([]*monitor.EvalMatch, 0),
+		AlertOkEvalMatches: make([]*monitor.EvalMatch, 0),
+		PrevAlertState:     rule.State,
 	}
 }
 
@@ -197,8 +195,11 @@ func getNewStateInternal(c *EvalContext) monitor.AlertStateType {
 	return monitor.AlertStateOK
 }
 
-func (c *EvalContext) GetNotificationTemplateConfig() monitor.NotificationTemplateConfig {
+func (c *EvalContext) GetNotificationTemplateConfig(matches []*monitor.EvalMatch) monitor.NotificationTemplateConfig {
 	desc := c.Rule.Message
+	if len(c.Rule.TriggeredMessages) > 0 {
+		desc = strings.Join(c.Rule.TriggeredMessages, " ")
+	}
 	if c.Error != nil {
 		if desc != "" {
 			desc += "\n"
@@ -206,18 +207,46 @@ func (c *EvalContext) GetNotificationTemplateConfig() monitor.NotificationTempla
 		desc += "Error: " + c.Error.Error()
 	}
 	tz, _ := time.LoadLocation(options.Options.TimeZone)
-	return monitor.NotificationTemplateConfig{
+	cfg := monitor.NotificationTemplateConfig{
 		Title:        c.GetNotificationTitle(),
 		Name:         c.Rule.Name,
-		ResourceName: c.GetResourceNameOfMathes(nil),
-		Matches:      c.GetEvalMatches(),
-		StartTime:    c.StartTime.In(tz).Format("2006-01-02 15:04:05"),
-		EndTime:      c.EndTime.In(tz).Format("2006-01-02 15:04:05"),
-		Description:  desc,
-		Level:        c.Rule.Level,
-		NoDataFound:  c.NoDataFound,
-		WebUrl:       c.GetCallbackURLPrefix(),
+		ResourceName: c.GetResourceNameOfMatches(matches),
+		Matches:      matches,
+		MatchTags:    make([]map[string]string, len(matches)),
+		MatchTagsStr: make([]string, len(matches)),
+		//Matches:      c.GetEvalMatches(),
+		StartTime:   c.StartTime.In(tz).Format("2006-01-02 15:04:05"),
+		EndTime:     c.EndTime.In(tz).Format("2006-01-02 15:04:05"),
+		Description: desc,
+		Level:       c.Rule.Level,
+		NoDataFound: c.NoDataFound,
+		WebUrl:      c.GetCallbackURLPrefix(),
 	}
+	// calculate match tags
+	diffKeySets := make(map[string]sets.String)
+	for i := range cfg.Matches {
+		m := cfg.Matches[i]
+		for mk, mv := range m.Tags {
+			if _, ok := diffKeySets[mk]; !ok {
+				diffKeySets[mk] = sets.NewString()
+			}
+			if sets.NewString("name", "host", "host_id", "ip", "host_id", "vm_id", "access_ip").Has(mk) {
+				continue
+			}
+			diffKeySets[mk].Insert(mv)
+		}
+	}
+	for i := range cfg.Matches {
+		m := cfg.Matches[i]
+		cfg.MatchTags[i] = make(map[string]string)
+		for diffKey, s := range diffKeySets {
+			if s.Len() > 1 {
+				cfg.MatchTags[i][diffKey] = m.Tags[diffKey]
+			}
+		}
+		cfg.MatchTagsStr[i] = jsonutils.Marshal(cfg.MatchTags[i]).String()
+	}
+	return cfg
 }
 
 func (c *EvalContext) GetEvalMatches() []monitor.EvalMatch {
@@ -241,19 +270,46 @@ func (c *EvalContext) GetEvalMatches() []monitor.EvalMatch {
 	return ret
 }
 
-func (c *EvalContext) GetResourceNameOfMathes(matches []monitor.EvalMatch) string {
-	names := strings.Builder{}
-	if matches == nil {
-		matches = c.GetEvalMatches()
+func (c *EvalContext) getTagsDesc(tags map[string]string) string {
+	strs := make([]string, 0)
+	for k, v := range tags {
+		if v == "" {
+			continue
+		}
+		strs = append(strs, k+"="+v)
 	}
+	sort.Strings(strs)
+	ret := strings.Join(strs, ",")
+	return "{" + ret + "}"
+}
+
+func (c *EvalContext) GetResourceNameOfMatches(matches []*monitor.EvalMatch) string {
+	names := strings.Builder{}
+	names.WriteString("\n")
 	for i, match := range matches {
-		if name, ok := match.Tags["name"]; ok {
-			names.WriteString(name)
-			names.WriteString(fmt.Sprintf("(%s)", match.ValueStr))
-			if i < len(matches)-1 {
-				names.WriteString("、")
-			}
+		if name, ok := match.Tags["name"]; ok && name != "" {
+			names.WriteString(fmt.Sprintf("- %s.%s: %s", name, match.Metric, match.ValueStr))
+		} else {
+			names.WriteString(fmt.Sprintf("- %s%s: %s", match.Metric, c.getTagsDesc(match.Tags), match.ValueStr))
+		}
+		if i < len(matches)-1 {
+			names.WriteString("\n")
 		}
 	}
 	return names.String()
+}
+
+func (c *EvalContext) GetRecoveredMatches() []*monitor.EvalMatch {
+	ret := make([]*monitor.EvalMatch, 0)
+	for i := range c.AlertOkEvalMatches {
+		m := c.AlertOkEvalMatches[i]
+		if m.IsRecovery {
+			ret = append(ret, m)
+		}
+	}
+	return ret
+}
+
+func (c *EvalContext) HasRecoveredMatches() bool {
+	return len(c.GetRecoveredMatches()) != 0
 }

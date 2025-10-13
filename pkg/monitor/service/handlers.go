@@ -18,7 +18,6 @@ import (
 	"context"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
 	"strconv"
 
 	"github.com/gorilla/mux"
@@ -31,6 +30,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
 	"yunion.io/x/onecloud/pkg/monitor/models"
+	"yunion.io/x/onecloud/pkg/monitor/options"
 )
 
 func InitHandlers(app *appsrv.Application) {
@@ -41,10 +41,13 @@ func InitHandlers(app *appsrv.Application) {
 	db.RegisterModelManager(db.RoleCacheManager)
 	db.RegistUserCredCacheUpdater()
 
+	taskman.AddTaskHandler("", app)
+
 	for _, manager := range []db.IModelManager{
 		taskman.TaskManager,
 		taskman.SubTaskManager,
 		taskman.TaskObjectManager,
+		taskman.ArchivedTaskManager,
 	} {
 		db.RegisterModelManager(manager)
 	}
@@ -104,10 +107,12 @@ func InitInfluxDBSubscriptionHandlers(app *appsrv.Application, options *common_o
 
 	addr := net.JoinHostPort(options.Address, strconv.Itoa(options.Port))
 	if options.EnableSsl {
-		err := http.ListenAndServeTLS(addr,
+		srv := appsrv.InitHTTPServer(app, addr)
+		srv.Handler = root
+		err := srv.ListenAndServeTLS(
 			options.SslCertfile,
 			options.SslKeyfile,
-			root)
+		)
 		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("%v", err)
 		}
@@ -126,13 +131,5 @@ func addMiscHandlers(app *appsrv.Application, root *mux.Router) {
 		}
 	}
 	root.HandleFunc("/subscriptions/write", adapterF(performHandler))
-
-	// ref: pkg/appsrv/appsrv:addDefaultHandlers
-	root.HandleFunc("/version", adapterF(appsrv.VersionHandler))
-	root.HandleFunc("/stats", adapterF(appsrv.StatisticHandler))
-	root.HandleFunc("/ping", adapterF(appsrv.PingHandler))
-	root.HandleFunc("/worker_stats", adapterF(appsrv.WorkerStatsHandler))
-
-	// pprof handler
-	root.PathPrefix("/debug/pprof/").Handler(http.DefaultServeMux)
+	appsrv.AddMiscHandlersToMuxRouter(app, root, options.Options.EnableAppProfiling)
 }

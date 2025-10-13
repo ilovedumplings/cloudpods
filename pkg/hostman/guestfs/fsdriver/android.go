@@ -90,10 +90,6 @@ func (m *sBaseAndroidRootFs) DeployHosts(part IDiskPartition, hn, domain string,
 	return nil
 }
 
-func (m *sBaseAndroidRootFs) DeployQgaBlackList(part IDiskPartition) error {
-	return nil
-}
-
 func (m *sBaseAndroidRootFs) GetOs() string {
 	return "Android"
 }
@@ -117,6 +113,10 @@ func (m *sBaseAndroidRootFs) PrepareFsForTemplate(IDiskPartition) error {
 }
 
 func (m *sBaseAndroidRootFs) DeployNetworkingScripts(rootfs IDiskPartition, nics []*types.SServerNic) error {
+	return nil
+}
+
+func (m *sBaseAndroidRootFs) ConfigSshd(loginAccount, loginPassword string, sshPort int) error {
 	return nil
 }
 

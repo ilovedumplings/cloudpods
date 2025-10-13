@@ -15,14 +15,12 @@
 package k8s
 
 import (
-	"yunion.io/x/jsonutils"
-
-	"yunion.io/x/onecloud/pkg/mcclient"
-	"yunion.io/x/onecloud/pkg/mcclient/modules"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/tasks"
 )
 
 var (
-	KubeTasks *KubeTasksManager
+	KubeTasks         *tasks.TasksManager
+	ArchivedKubeTasks *tasks.TasksManager
 )
 
 type KubeTasksManager struct {
@@ -30,15 +28,13 @@ type KubeTasksManager struct {
 }
 
 func init() {
-	KubeTasks = &KubeTasksManager{
-		ResourceManager: *NewResourceManager("task", "tasks", NewColumns(), NewColumns("Id", "Obj_name", "Obj_Id", "Task_name", "Stage", "Created_at")),
+	k8sTasksMan := NewResourceManager("task", "tasks", NewColumns(), NewColumns("Id", "Obj_name", "Obj_Id", "Task_name", "Stage", "Created_at"))
+	k8sArchivedTasksMan := NewResourceManager("archivedtask", "archivedtasks", NewColumns(), NewColumns("Id", "Obj_name", "Obj_Id", "Task_name", "Stage", "Created_at"))
+
+	KubeTasks = &tasks.TasksManager{
+		ResourceManager: k8sTasksMan.GetBaseManager(),
 	}
-}
-
-func (m *KubeTasksManager) TaskComplete(session *mcclient.ClientSession, taskId string, params jsonutils.JSONObject) {
-	modules.TaskComplete(m, session, taskId, params)
-}
-
-func (m *KubeTasksManager) TaskFailed(session *mcclient.ClientSession, taskId string, reason string) {
-	modules.TaskFailed(m, session, taskId, reason)
+	ArchivedKubeTasks = &tasks.TasksManager{
+		ResourceManager: k8sArchivedTasksMan.GetBaseManager(),
+	}
 }

@@ -59,7 +59,7 @@ func init() {
 	lock = new(sync.Mutex)
 }
 
-func (d *NBDDriver) Connect(*apis.GuestDesc) error {
+func (d *NBDDriver) Connect(*apis.GuestDesc, string) error {
 	d.nbdDev = GetNBDManager().AcquireNbddev()
 	if len(d.nbdDev) == 0 {
 		return errors.Errorf("Cannot get nbd device")
@@ -239,16 +239,16 @@ func (d *NBDDriver) MakePartition(fs string) error {
 	return fsutils.Mkpartition(d.nbdDev, fs)
 }
 
-func (d *NBDDriver) FormatPartition(fs, uuid string) error {
-	return fsutils.FormatPartition(fmt.Sprintf("%sp1", d.nbdDev), fs, uuid)
+func (d *NBDDriver) FormatPartition(fs, uuid string, features *apis.FsFeatures) error {
+	return fsutils.FormatPartition(fmt.Sprintf("%sp1", d.nbdDev), fs, uuid, features)
 }
 
-func (d *NBDDriver) ResizePartition() error {
+func (d *NBDDriver) ResizePartition(string, string) error {
 	if d.IsLVMPartition() {
 		// do not resize LVM partition
 		return nil
 	}
-	return fsutils.ResizeDiskFs(d.nbdDev, 0)
+	return fsutils.ResizeDiskFs(d.nbdDev, 0, false)
 }
 
 func (d *NBDDriver) Zerofree() {
@@ -267,6 +267,10 @@ func (d *NBDDriver) DetectIsUEFISupport(rootfs fsdriver.IRootFsDriver) bool {
 	return fsutils.DetectIsUEFISupport(rootfs, d.GetPartitions())
 }
 
+func (d *NBDDriver) DetectIsBIOSSupport(rootfs fsdriver.IRootFsDriver) bool {
+	return fsutils.DetectIsBIOSSupport(d.nbdDev, rootfs)
+}
+
 func (d *NBDDriver) MountRootfs(readonly bool) (fsdriver.IRootFsDriver, error) {
 	return fsutils.MountRootfs(readonly, d.GetPartitions())
 }
@@ -282,8 +286,8 @@ func (d *NBDDriver) DeployGuestfs(req *apis.DeployParams) (res *apis.DeployGuest
 	return fsutils.DeployGuestfs(d, req)
 }
 
-func (d *NBDDriver) ResizeFs() (*apis.Empty, error) {
-	return fsutils.ResizeFs(d)
+func (d *NBDDriver) ResizeFs(*apis.ResizeFsParams) (*apis.Empty, error) {
+	return fsutils.ResizeFs(d, "")
 }
 
 func (d *NBDDriver) SaveToGlance(req *apis.SaveToGlanceParams) (*apis.SaveToGlanceResponse, error) {

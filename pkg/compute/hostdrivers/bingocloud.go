@@ -36,10 +36,14 @@ func (self *SBingoCloudHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_BINGO_CLOUD
 }
 
+func (self *SBingoCloudHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_BINGO_CLOUD
+}
+
 func (self *SBingoCloudHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	return nil
 }
 
 func (driver *SBingoCloudHostDriver) GetStoragecacheQuota(host *models.SHost) int {
-	return 100
+	return -1
 }

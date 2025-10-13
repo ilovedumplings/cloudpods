@@ -16,7 +16,9 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
@@ -78,7 +80,12 @@ func (self *SBaremetalCdromTask) getRedfishApi(ctx context.Context) (redfish.IRe
 	if !ipmiInfo.CdromBoot {
 		return nil, errors.Error("mount Virtual Cdrom not supported")
 	}
-	redfishCli := redfish.NewRedfishDriver(ctx, "https://"+ipmiInfo.IpAddr, ipmiInfo.Username, ipmiInfo.Password, false)
+
+	var endpoint = "https://" + ipmiInfo.IpAddr
+	if strings.Contains(ipmiInfo.IpAddr, ":") {
+		endpoint = fmt.Sprintf("https://[%s]", ipmiInfo.IpAddr)
+	}
+	redfishCli := redfish.NewRedfishDriver(ctx, endpoint, ipmiInfo.Username, ipmiInfo.Password, false)
 	if redfishCli != nil {
 		return redfishCli, nil
 	} else {
@@ -106,7 +113,7 @@ func (self *SBaremetalCdromTask) DoInsertISO(ctx context.Context, args interface
 	if err != nil {
 		return errors.Wrap(err, "MountVirtualCdrom")
 	}
-	self.Baremetal.AutoSyncStatus()
+	self.Baremetal.AutoSyncStatus(ctx)
 	SetTaskComplete(self, nil)
 	return nil
 }
@@ -120,7 +127,7 @@ func (self *SBaremetalCdromTask) DoEjectISO(ctx context.Context, args interface{
 	if err != nil {
 		return errors.Wrap(err, "UmountVirtualCdrom")
 	}
-	self.Baremetal.AutoSyncStatus()
+	self.Baremetal.AutoSyncStatus(ctx)
 	SetTaskComplete(self, nil)
 	return nil
 }

@@ -41,6 +41,9 @@ type K8sEnv struct {
 type Kubectl struct {
 	*BaseCommand
 	kubeconfig string
+	// For display info
+	InstanceName string
+	IPs          []string
 }
 
 func NewKubectlCommand(s *mcclient.ClientSession, kubeconfig, namespace string) *Kubectl {
@@ -53,6 +56,22 @@ func NewKubectlCommand(s *mcclient.ClientSession, kubeconfig, namespace string) 
 		BaseCommand: cmd,
 		kubeconfig:  kubeconfig,
 	}
+}
+
+func (c *Kubectl) SetInstanceName(name string) {
+	c.InstanceName = name
+}
+
+func (c *Kubectl) GetInstanceName() string {
+	return c.InstanceName
+}
+
+func (c *Kubectl) SetIPs(ips []string) {
+	c.IPs = ips
+}
+
+func (c *Kubectl) GetIPs() []string {
+	return c.IPs
 }
 
 func (c *Kubectl) GetCommand() *exec.Cmd {
@@ -133,13 +152,19 @@ func NewPodBashCommand(env *K8sEnv) ICommand {
 		args = append(args, shellRequest.Command)
 		shellRequest.Command = "env"
 	}
+	args = append(args, shellRequest.Args...)
 
-	return NewKubectlCommand(env.Session, env.Kubeconfig, env.Namespace).Exec().
+	kExec := NewKubectlCommand(env.Session, env.Kubeconfig, env.Namespace).Exec().
 		Stdin().
 		TTY().
 		Pod(env.Pod).
 		Container(env.Container).
 		Command(shellRequest.Command, args...)
+	if shellRequest.DisplayInfo != nil {
+		kExec.SetInstanceName(shellRequest.DisplayInfo.InstanceName)
+		kExec.SetIPs(shellRequest.DisplayInfo.IPs)
+	}
+	return kExec
 }
 
 type KubectlLog struct {

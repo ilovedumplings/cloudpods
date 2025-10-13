@@ -88,7 +88,7 @@ type SUser struct {
 	// 用户邮箱
 	Email string `width:"64" charset:"utf8" nullable:"true" index:"true" list:"domain" update:"domain" create:"domain_optional"`
 	// 用户手机号
-	Mobile string `width:"20" charset:"ascii" nullable:"true" index:"true" list:"domain" update:"domain" create:"domain_optional"`
+	Mobile string `width:"20" charset:"utf8" nullable:"true" index:"true" list:"domain" update:"domain" create:"domain_optional"`
 
 	// 显示名称，用户登录后显示在右上角菜单入口
 	Displayname string `with:"128" charset:"utf8" nullable:"true" list:"domain" update:"domain" create:"domain_optional"`
@@ -165,11 +165,20 @@ func (manager *SUserManager) InitializeData() error {
 			return errors.Wrap(err, "update")
 		}
 	}
-	err = manager.initSystemAccount()
-	if err != nil {
-		return errors.Wrap(err, "initSystemAccount")
+	{
+		err := manager.initSystemAccount()
+		if err != nil {
+			return errors.Wrap(err, "initSystemAccount")
+		}
 	}
-	return manager.initSysUser(context.TODO())
+	{
+		err := manager.initSysUser(context.TODO())
+		if err != nil {
+			return errors.Wrap(err, "initSystemAccount")
+		}
+	}
+
+	return nil
 }
 
 func (manager *SUserManager) initSystemAccount() error {
@@ -237,6 +246,30 @@ func (manager *SUserManager) initSysUser(ctx context.Context) error {
 	err = usr.initLocalData(o.Options.BootstrapAdminUserPassword, false)
 	if err != nil {
 		return errors.Wrap(err, "initLocalData")
+	}
+	return nil
+}
+
+func (manager *SUserManager) EnforceUserMfa(ctx context.Context) error {
+	if options.Options.ForceEnableMfa != "all" {
+		return nil
+	}
+	q := manager.Query().IsFalse("enable_mfa")
+
+	users := make([]SUser, 0)
+	err := db.FetchModelObjects(manager, q, &users)
+	if err != nil {
+		return errors.Wrap(err, "FetchModelObjects")
+	}
+	for i := range users {
+		_, err := db.Update(&users[i], func() error {
+			users[i].EnableMfa = tristate.True
+			return nil
+		})
+		if err != nil {
+			return errors.Wrap(err, "update enable mfa")
+		}
+		logclient.AddSimpleActionLog(&users[i], logclient.ACT_UPDATE, "force enable mfa", GetDefaultAdminCred(), true)
 	}
 	return nil
 }
@@ -315,11 +348,11 @@ func VerifyPassword(user *api.SUserExtended, passwd string) error {
 }
 
 func localUserVerifyPassword(user *api.SUserExtended, passwd string) error {
-	passes, err := PasswordManager.fetchByLocaluserId(user.LocalId)
+	pass, err := PasswordManager.FetchByLocaluserIdNewestPassword(user.LocalId)
 	if err != nil {
 		return errors.Wrap(err, "fetchPassword")
 	}
-	if len(passes) == 0 {
+	if pass == nil {
 		return errors.Error("no valid password")
 	}
 	// password expiration check skip system account
@@ -327,14 +360,14 @@ func localUserVerifyPassword(user *api.SUserExtended, passwd string) error {
 	// 	return errors.Error("password expires")
 	// }
 	// password expires, no error returns but set user need to reset password silently
-	if passes[0].IsExpired() {
+	if pass.IsExpired() {
 		localUsr, err := LocalUserManager.fetchLocalUser("", "", user.LocalId)
 		if err != nil {
 			return errors.Wrap(err, "fetchLocalUser")
 		}
 		localUsr.markNeedResetPassword(true, api.PasswordResetHintExpire)
 	}
-	err = seclib2.BcryptVerifyPassword(passwd, passes[0].PasswordHash)
+	err = seclib2.BcryptVerifyPassword(passwd, pass.PasswordHash)
 	if err == nil {
 		return nil
 	}
@@ -549,6 +582,11 @@ func (manager *SUserManager) ValidateCreateData(
 		return input, errors.Wrapf(err, "CheckSetPendingQuota")
 	}
 
+	if options.Options.ForceEnableMfa != "disable" {
+		boolTrue := true
+		input.EnableMfa = &boolTrue
+	}
+
 	return input, nil
 }
 
@@ -589,6 +627,10 @@ func (user *SUser) ValidateUpdateData(ctx context.Context, userCred mcclient.Tok
 		if err != nil {
 			return input, httperrors.NewInputParameterError("invalid password: %s", err)
 		}
+	}
+	if options.Options.ForceEnableMfa != "disable" {
+		boolTrue := true
+		input.EnableMfa = &boolTrue
 	}
 	var err error
 	input.EnabledIdentityBaseUpdateInput, err = user.SEnabledIdentityBaseResource.ValidateUpdateData(ctx, userCred, query, input.EnabledIdentityBaseUpdateInput)
@@ -761,10 +803,44 @@ func (manager *SUserManager) FetchCustomizeColumns(
 		projectMap[p.UserId] = append(projectMap[p.UserId], p.SFetchDomainObjectWithMetadata)
 	}
 
+	groups := GroupManager.Query().SubQuery()
+	domains = DomainManager.Query().SubQuery()
+	ugs := UsergroupManager.Query().In("user_id", userIds).SubQuery()
+
+	q = groups.Query(
+		groups.Field("id"),
+		groups.Field("name"),
+		domains.Field("id").Label("domain_id"),
+		domains.Field("name").Label("domain"),
+		ugs.Field("user_id"),
+	)
+
+	q = q.Join(domains, sqlchemy.Equals(groups.Field("domain_id"), domains.Field("id")))
+	q = q.Join(ugs, sqlchemy.Equals(groups.Field("id"), ugs.Field("group_id")))
+
+	useGroups := []struct {
+		api.SUserGroup
+		UserId string
+	}{}
+	err = q.All(&useGroups)
+	if err != nil {
+		log.Errorf("query user groups error: %v", err)
+		return rows
+	}
+	groupMap := map[string][]api.SUserGroup{}
+	for _, ug := range useGroups {
+		_, ok := groupMap[ug.UserId]
+		if !ok {
+			groupMap[ug.UserId] = []api.SUserGroup{}
+		}
+		groupMap[ug.UserId] = append(groupMap[ug.UserId], ug.SUserGroup)
+	}
+
 	for i := range rows {
 		rows[i].ExternalResourceInfo, _ = scopeResources[userIds[i]]
 		rows[i].UserUsage, _ = usage[userIds[i]]
 		rows[i].Projects, _ = projectMap[userIds[i]]
+		rows[i].Groups, _ = groupMap[userIds[i]]
 	}
 
 	return rows
@@ -1231,8 +1307,13 @@ func (user *SUser) PerformJoin(
 ) (jsonutils.JSONObject, error) {
 	err := joinProjects(user, true, ctx, userCred, input)
 	if err != nil {
+		logclient.AddActionLogWithContext(ctx, user, logclient.ACT_JOIN_PROJECT, nil, userCred, false)
 		return nil, errors.Wrap(err, "joinProjects")
 	}
+	if input.Enabled {
+		db.EnabledPerformEnable(user, ctx, userCred, true)
+	}
+	logclient.AddActionLogWithContext(ctx, user, logclient.ACT_JOIN_PROJECT, nil, userCred, true)
 	return nil, nil
 }
 
@@ -1302,8 +1383,10 @@ func (user *SUser) PerformLeave(
 ) (jsonutils.JSONObject, error) {
 	err := leaveProjects(user, true, ctx, userCred, input)
 	if err != nil {
+		logclient.AddActionLogWithContext(ctx, user, logclient.ACT_LEAVE_PROJECT, nil, userCred, false)
 		return nil, err
 	}
+	logclient.AddActionLogWithContext(ctx, user, logclient.ACT_LEAVE_PROJECT, nil, userCred, true)
 	return nil, nil
 }
 
@@ -1459,6 +1542,7 @@ func (user *SUser) PerformResetCredentials(
 			return nil, errors.Wrapf(err, "DeleteAll %s", api.RECOVERY_SECRETS_TYPE)
 		}
 	}
+	logclient.AddActionLogWithContext(ctx, user, logclient.ACT_RESET_CREDENTIAL, nil, userCred, true)
 	return nil, nil
 }
 

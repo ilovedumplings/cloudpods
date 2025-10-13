@@ -34,6 +34,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=natsentry
+// +onecloud:swagger-gen-model-plural=natsenties
 type SNatSEntryManager struct {
 	SNatEntryManager
 	SNetworkResourceBaseManager
@@ -470,7 +472,7 @@ func (self *SNatSEntry) GetEip() (*SElasticip, error) {
 		return &eips[0], nil
 	}
 	if len(eips) == 0 {
-		return nil, errors.Wrapf(cloudprovider.ErrNotFound, self.IP)
+		return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%v", self.IP)
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrDuplicateId, self.IP)
+	return nil, errors.Wrapf(cloudprovider.ErrDuplicateId, "%v", self.IP)
 }

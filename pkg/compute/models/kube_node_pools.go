@@ -37,6 +37,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=cloud_kube_node_pool
+// +onecloud:swagger-gen-model-plural=cloud_kube_node_pools
 type SKubeNodePoolManager struct {
 	db.SStatusStandaloneResourceBaseManager
 	db.SExternalizedResourceBaseManager
@@ -146,7 +148,7 @@ func (self *SKubeNodePool) GetIKubeNodePool(ctx context.Context) (cloudprovider.
 			return pools[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, self.ExternalId)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", self.ExternalId)
 }
 
 func (manager *SKubeNodePoolManager) FetchOwnerId(ctx context.Context, data jsonutils.JSONObject) (mcclient.IIdentityProvider, error) {

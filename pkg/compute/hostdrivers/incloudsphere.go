@@ -39,12 +39,16 @@ func (self *SInCloudSphereHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_INCLOUD_SPHERE
 }
 
+func (self *SInCloudSphereHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_INCLOUD_SPHERE
+}
+
 func (self *SInCloudSphereHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	return nil
 }
 
 func (self *SInCloudSphereHostDriver) GetStoragecacheQuota(host *models.SHost) int {
-	return 100
+	return -1
 }
 
 func (self *SInCloudSphereHostDriver) ValidateResetDisk(ctx context.Context, userCred mcclient.TokenCredential, disk *models.SDisk, snapshot *models.SSnapshot, guests []models.SGuest, input *api.DiskResetInput) (*api.DiskResetInput, error) {

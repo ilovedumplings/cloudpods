@@ -83,15 +83,15 @@ func (region *SRegion) GetClient() *SKsyunClient {
 }
 
 func (region *SRegion) CreateEIP(opts *cloudprovider.SEip) (cloudprovider.ICloudEIP, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	return region.CreateEip(opts)
 }
 
 func (region *SRegion) CreateISecurityGroup(conf *cloudprovider.SecurityGroupCreateInput) (cloudprovider.ICloudSecurityGroup, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	return region.CreateSecurityGroup(conf)
 }
 
 func (region *SRegion) CreateIVpc(opts *cloudprovider.VpcCreateOptions) (cloudprovider.ICloudVpc, error) {
-	return nil, cloudprovider.ErrNotImplemented
+	return region.CreateVpc(opts)
 }
 
 func (region *SRegion) GetIVpcs() ([]cloudprovider.ICloudVpc, error) {
@@ -238,22 +238,48 @@ func (region *SRegion) GetIStorages() ([]cloudprovider.ICloudStorage, error) {
 	return iStores, nil
 }
 
-func (region *SRegion) ecsRequest(action string, params map[string]string) (jsonutils.JSONObject, error) {
+func (r *SRegion) GetIVMs() ([]cloudprovider.ICloudVM, error) {
+	vms, err := r.GetInstances("", nil)
+	if err != nil {
+		return nil, err
+	}
+	ret := []cloudprovider.ICloudVM{}
+	for i := range vms {
+		vms[i].region = r
+		ret = append(ret, &vms[i])
+	}
+	return ret, nil
+}
+
+func (r *SRegion) GetIVMById(id string) (cloudprovider.ICloudVM, error) {
+	vm, err := r.GetInstance(id)
+	if err != nil {
+		return nil, err
+	}
+	vm.region = r
+	return vm, nil
+}
+
+func (region *SRegion) ecsRequest(action string, params map[string]interface{}) (jsonutils.JSONObject, error) {
 	return region.client.ec2Request(region.Region, action, params)
 }
 
-func (region *SRegion) tagRequest(action string, params map[string]string) (jsonutils.JSONObject, error) {
+func (region *SRegion) tagRequest(action string, params map[string]interface{}) (jsonutils.JSONObject, error) {
 	return region.client.tagRequest(region.Region, action, params)
 }
 
-func (region *SRegion) eipRequest(action string, params map[string]string) (jsonutils.JSONObject, error) {
+func (region *SRegion) eipRequest(action string, params map[string]interface{}) (jsonutils.JSONObject, error) {
 	return region.client.eipRequest(region.Region, action, params)
 }
 
-func (region *SRegion) ebsRequest(action string, params map[string]string) (jsonutils.JSONObject, error) {
+func (region *SRegion) ebsRequest(action string, params map[string]interface{}) (jsonutils.JSONObject, error) {
 	return region.client.ebsRequest(region.Region, action, params)
 }
 
-func (region *SRegion) vpcRequest(action string, params map[string]string) (jsonutils.JSONObject, error) {
+func (region *SRegion) vpcRequest(action string, params map[string]interface{}) (jsonutils.JSONObject, error) {
 	return region.client.vpcRequest(region.Region, action, params)
+}
+
+func (region *SRegion) rdsRequest(action string, params map[string]interface{}) (jsonutils.JSONObject, error) {
+	return region.client.rdsRequest(region.Region, action, params)
 }

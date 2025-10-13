@@ -27,10 +27,11 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/app"
 	"yunion.io/x/onecloud/pkg/cloudcommon/cronman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
+	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	common_options "yunion.io/x/onecloud/pkg/cloudcommon/options"
 	"yunion.io/x/onecloud/pkg/notify/models"
 	"yunion.io/x/onecloud/pkg/notify/options"
-	_ "yunion.io/x/onecloud/pkg/notify/policy"
+	"yunion.io/x/onecloud/pkg/notify/policy"
 	_ "yunion.io/x/onecloud/pkg/notify/sender/smsdriver"
 	_ "yunion.io/x/onecloud/pkg/notify/tasks"
 )
@@ -42,6 +43,7 @@ func StartService() {
 	dbOpts := &options.Options.DBOptions
 	baseOpts := &options.Options.BaseOptions
 	common_options.ParseOptions(opts, os.Args, "notify.conf", api.SERVICE_TYPE)
+	policy.Init()
 
 	// init auth
 	app.InitAuth(commonOpts, func() {
@@ -68,15 +70,25 @@ func StartService() {
 		}
 	}
 
-	cron := cronman.InitCronJobManager(true, 2)
-	// update service
-	cron.AddJobAtIntervalsWithStartRun("syncReciverFromKeystone", time.Duration(opts.SyncReceiverIntervalMinutes)*time.Minute, models.ReceiverManager.SyncUserFromKeystone, true)
+	if !opts.IsSlaveNode {
+		err := taskman.TaskManager.InitializeData()
+		if err != nil {
+			log.Fatalf("TaskManager.InitializeData fail %s", err)
+		}
 
-	// wrapped func to resend notifications
-	cron.AddJobAtIntervals("ReSendNotifications", time.Duration(opts.ReSendScope)*time.Second, models.NotificationManager.ReSend)
-	cron.AddJobEveryFewHour("AutoPurgeSplitable", 4, 30, 0, db.AutoPurgeSplitable, false)
+		cron := cronman.InitCronJobManager(true, 2, opts.TimeZone)
+		// update service
+		cron.AddJobAtIntervalsWithStartRun("syncReciverFromKeystone", time.Duration(opts.SyncReceiverIntervalMinutes)*time.Minute, models.ReceiverManager.SyncUserFromKeystone, true)
 
-	cron.Start()
+		// wrapped func to resend notifications
+		cron.AddJobAtIntervals("ReSendNotifications", time.Duration(opts.ReSendScope)*time.Second, models.NotificationManager.ReSend)
+		cron.AddJobEveryFewHour("AutoPurgeSplitable", 4, 30, 0, db.AutoPurgeSplitable, false)
+		cron.AddJobEveryFewDays("InitReceiverProject", 7, 0, 0, 0, models.InitReceiverProject, true)
+
+		cron.AddJobAtIntervalsWithStartRun("TaskCleanupJob", time.Duration(options.Options.TaskArchiveIntervalMinutes)*time.Minute, taskman.TaskManager.TaskCleanupJob, true)
+
+		cron.Start()
+	}
 
 	app.ServeForever(applicaion, baseOpts)
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"yunion.io/x/onecloud/pkg/apis"
+	"yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/scheduler/algorithm/predicates"
 	"yunion.io/x/onecloud/pkg/scheduler/core"
 )
@@ -37,7 +38,8 @@ func (f *CPUPredicate) Clone() core.FitPredicate {
 }
 
 func (f *CPUPredicate) PreExecute(ctx context.Context, u *core.Unit, cs []core.Candidater) (bool, error) {
-	if !u.GetHypervisorDriver().DoScheduleCPUFilter() {
+	driver := u.GetHypervisorDriver()
+	if driver != nil && !driver.DoScheduleCPUFilter() {
 		return false, nil
 	}
 
@@ -59,24 +61,27 @@ func (f *CPUPredicate) Execute(ctx context.Context, u *core.Unit, c core.Candida
 
 	archMatch := true
 	isArmHost := getter.IsArmHost()
-	if apis.IsARM(d.OsArch) {
-		// process arm64 host
-		if !isArmHost {
-			archMatch = false
-		}
-	} else {
-		// process x86_64 host
-		if isArmHost {
-			archMatch = false
+	if d.Hypervisor != compute.HYPERVISOR_POD {
+		if apis.IsARM(d.OsArch) {
+			// process arm64 host
+			if !isArmHost {
+				archMatch = false
+			}
+		} else {
+			// process x86_64 host
+			if isArmHost {
+				archMatch = false
+			}
 		}
 	}
+
 	if !archMatch {
 		h.Exclude2(predicates.ErrHostCpuArchitectureNotMatch, getter.CPUArch(), d.OsArch)
 		return h.GetResult()
 	}
 
 	freeCPUCount := getter.FreeCPUCount(useRsvd)
-	reqCPUCount := int64(d.Ncpu)
+	reqCPUCount := int64(d.Ncpu + d.ExtraCpuCount)
 	if freeCPUCount < reqCPUCount {
 		totalCPUCount := getter.TotalCPUCount(useRsvd)
 		h.AppendInsufficientResourceError(reqCPUCount, totalCPUCount, freeCPUCount)

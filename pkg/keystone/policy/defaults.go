@@ -18,6 +18,7 @@ import (
 	"yunion.io/x/pkg/util/rbacscope"
 
 	api "yunion.io/x/onecloud/pkg/apis/identity"
+	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
 	common_policy "yunion.io/x/onecloud/pkg/cloudcommon/policy"
 	"yunion.io/x/onecloud/pkg/util/rbacutils"
 )
@@ -33,24 +34,6 @@ const (
 
 var (
 	predefinedDefaultPolicies = []rbacutils.SRbacPolicy{
-		{
-			Auth:  true,
-			Scope: rbacscope.ScopeSystem,
-			Rules: []rbacutils.SRbacRule{
-				{
-					Service:  api.SERVICE_TYPE,
-					Resource: "services",
-					Action:   PolicyActionGet,
-					Result:   rbacutils.Allow,
-				},
-				{
-					Service:  api.SERVICE_TYPE,
-					Resource: "services",
-					Action:   PolicyActionList,
-					Result:   rbacutils.Allow,
-				},
-			},
-		},
 		{
 			Auth:  true,
 			Scope: rbacscope.ScopeUser,
@@ -191,6 +174,8 @@ var (
 	}
 )
 
-func init() {
-	common_policy.AppendDefaultPolicies(predefinedDefaultPolicies)
+func Init() {
+	if consts.IsEnableDefaultPolicy() {
+		common_policy.AppendDefaultPolicies(predefinedDefaultPolicies)
+	}
 }

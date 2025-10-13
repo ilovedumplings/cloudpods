@@ -16,7 +16,10 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"strings"
+	"time"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
@@ -27,6 +30,7 @@ import (
 
 	"yunion.io/x/onecloud/pkg/apis"
 	"yunion.io/x/onecloud/pkg/cloudcommon/consts"
+	"yunion.io/x/onecloud/pkg/cloudcommon/db/lockman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/policy"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
@@ -365,20 +369,21 @@ func (model *SStandaloneAnonResourceBase) SetOrganizationMetadataAll(ctx context
 			return errors.Wrap(err, "SetAllOrganization")
 		}
 	}
-	{
-		userTags := make(map[string]interface{})
-		for k, _ := range meta {
-			if strings.HasPrefix(k, ORGANIZATION_TAG_PREFIX) {
-				k = k[len(ORGANIZATION_TAG_PREFIX):]
-			}
-			k = USER_TAG_PREFIX + k
-			userTags[k] = "none"
-		}
-		err := Metadata.SetValuesWithLog(ctx, model, userTags, userCred)
-		if err != nil {
-			return errors.Wrap(err, "SetValuesWithLog userTags")
-		}
-	}
+	// 避免加入组织架构后，项目所在的层级会移除此项目
+	//{
+	//	userTags := make(map[string]interface{})
+	//	for k, _ := range meta {
+	//		if strings.HasPrefix(k, ORGANIZATION_TAG_PREFIX) {
+	//			k = k[len(ORGANIZATION_TAG_PREFIX):]
+	//		}
+	//		k = USER_TAG_PREFIX + k
+	//		userTags[k] = "none"
+	//	}
+	//	err := Metadata.SetValuesWithLog(ctx, model, userTags, userCred)
+	//	if err != nil {
+	//		return errors.Wrap(err, "SetValuesWithLog userTags")
+	//	}
+	//}
 	return nil
 }
 
@@ -639,6 +644,7 @@ func (model *SStandaloneAnonResourceBase) PerformUserMetadata(ctx context.Contex
 }
 
 // 全量替换资源的所有用户标签
+// +onecloud:swagger-gen-ignore
 func (model *SStandaloneAnonResourceBase) PerformSetUserMetadata(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PerformSetUserMetadataInput) (jsonutils.JSONObject, error) {
 	err := model.SetUserMetadataAll(ctx, input, userCred)
 	if err != nil {
@@ -648,6 +654,7 @@ func (model *SStandaloneAnonResourceBase) PerformSetUserMetadata(ctx context.Con
 }
 
 // 更新资源的 class 标签
+// +onecloud:swagger-gen-ignore
 func (model *SStandaloneAnonResourceBase) PerformClassMetadata(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PerformClassMetadataInput) (jsonutils.JSONObject, error) {
 	err := model.SetClassMetadataValues(ctx, input, userCred)
 	if err != nil {
@@ -657,6 +664,7 @@ func (model *SStandaloneAnonResourceBase) PerformClassMetadata(ctx context.Conte
 }
 
 // 全量替换资源的所有 class 标签
+// +onecloud:swagger-gen-ignore
 func (model *SStandaloneAnonResourceBase) PerformSetClassMetadata(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PerformSetClassMetadataInput) (jsonutils.JSONObject, error) {
 	err := model.SetClassMetadataAll(ctx, input, userCred)
 	if err != nil {
@@ -666,6 +674,7 @@ func (model *SStandaloneAnonResourceBase) PerformSetClassMetadata(ctx context.Co
 }
 
 // 全量替换资源的所有 class 标签
+// +onecloud:swagger-gen-ignore
 func (model *SStandaloneAnonResourceBase) PerformSetOrgMetadata(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PerformSetClassMetadataInput) (jsonutils.JSONObject, error) {
 	err := model.SetOrganizationMetadataAll(ctx, input, userCred)
 	if err != nil {
@@ -688,10 +697,12 @@ func validateDictStore(input map[string]string, prefix string) (map[string]strin
 	return dictStore, nil
 }
 
+// +onecloud:swagger-gen-ignore
 func (model *SStandaloneAnonResourceBase) GetDetailsClassMetadata(ctx context.Context, userCred mcclient.TokenCredential, input apis.GetClassMetadataInput) (apis.GetClassMetadataOutput, error) {
 	return model.GetAllClassMetadata()
 }
 
+// +onecloud:swagger-gen-ignore
 func (model *SStandaloneAnonResourceBase) GetDetailsOrgMetadata(ctx context.Context, userCred mcclient.TokenCredential, input apis.GetClassMetadataInput) (apis.GetClassMetadataOutput, error) {
 	return model.GetAllOrganizationMetadata()
 }
@@ -839,6 +850,7 @@ type SGetResourceTagValuePairsInput struct {
 	OrderByTagKey string `json:"order_by_tag_key"`
 }
 
+// +onecloud:swagger-gen-ignore
 func (manager *SStandaloneAnonResourceBaseManager) GetPropertyTagValuePairs(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
@@ -941,6 +953,7 @@ type SGetResourceTagValueTreeInput struct {
 	ShowMap *bool    `json:"show_map"`
 }
 
+// +onecloud:swagger-gen-ignore
 func (manager *SStandaloneAnonResourceBaseManager) GetPropertyTagValueTree(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
@@ -1012,7 +1025,7 @@ func GetTagValueCountMap(
 	}
 	objSubQ = objSubQ.AppendField(sumFieldQ)
 
-	objSubQ.DebugQuery2("GetTagValueCountMap objSubQ")
+	// objSubQ.DebugQuery2("GetTagValueCountMap objSubQ")
 
 	q := objSubQ.SubQuery().Query()
 	q = q.AppendField(sqlchemy.SUM(tagValueCountKey, q.Field("_sub_count_")))
@@ -1035,11 +1048,75 @@ func GetTagValueCountMap(
 	}
 	q = q.GroupBy(groupBy...)
 
-	q.DebugQuery2("GetTagValueCountMap")
+	// q.DebugQuery2("GetTagValueCountMap")
 
 	valueMap, err := q.AllStringMap()
 	if err != nil {
 		return nil, errors.Wrap(err, "AllStringAmp")
 	}
 	return valueMap, nil
+}
+
+func (manager *SStandaloneAnonResourceBaseManager) HistoryDataClean(ctx context.Context, timeBefor time.Time) (int, error) {
+	q := manager.RawQuery("id").IsTrue("deleted").LE("deleted_at", timeBefor)
+	rows, err := q.Rows()
+	if err != nil {
+		if errors.Cause(err) == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, errors.Wrap(err, "Query")
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		err := rows.Scan(&id)
+		if err != nil {
+			return 0, errors.Wrap(err, "rows.Scan")
+		}
+		ids = append(ids, id)
+	}
+	var purge = func(ids []string) error {
+		vars := []interface{}{}
+		placeholders := make([]string, len(ids))
+		for i := range placeholders {
+			placeholders[i] = "?"
+			vars = append(vars, ids[i])
+		}
+		placeholder := strings.Join(placeholders, ",")
+		sql := fmt.Sprintf(
+			"delete from %s where id in (%s)",
+			manager.TableSpec().Name(), placeholder,
+		)
+		lockman.LockRawObject(ctx, manager.Keyword(), "purge")
+		defer lockman.ReleaseRawObject(ctx, manager.Keyword(), "purge")
+
+		_, err = sqlchemy.GetDB().Exec(
+			sql, vars...,
+		)
+		if err != nil {
+			return errors.Wrapf(err, strings.ReplaceAll(sql, "?", "%s"), vars...)
+		}
+		return nil
+	}
+
+	var splitByLen = func(data []string, splitLen int) [][]string {
+		var result [][]string
+		for i := 0; i < len(data); i += splitLen {
+			end := i + splitLen
+			if end > len(data) {
+				end = len(data)
+			}
+			result = append(result, data[i:end])
+		}
+		return result
+	}
+	idsArr := splitByLen(ids, 100)
+	for i := range idsArr {
+		err = purge(idsArr[i])
+		if err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
 }

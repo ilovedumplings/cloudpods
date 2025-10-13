@@ -40,12 +40,16 @@ func (self *SOpenStackHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_OPENSTACK
 }
 
+func (self *SOpenStackHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_OPENSTACK
+}
+
 func (self *SOpenStackHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	return nil
 }
 
 func (driver *SOpenStackHostDriver) GetStoragecacheQuota(host *models.SHost) int {
-	return 100
+	return -1
 }
 
 func (self *SOpenStackHostDriver) ValidateResetDisk(ctx context.Context, userCred mcclient.TokenCredential, disk *models.SDisk, snapshot *models.SSnapshot, guests []models.SGuest, input *api.DiskResetInput) (*api.DiskResetInput, error) {

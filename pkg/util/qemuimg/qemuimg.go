@@ -38,7 +38,22 @@ import (
 
 var (
 	ErrUnsupportedFormat = errors.Error("unsupported format")
+
+	convertWorkInOrder = false
+	convertCoroutines  = 16
 )
+
+func SetConvertWorkInOrder(workInOrder bool) {
+	convertWorkInOrder = workInOrder
+}
+
+func SetConvertCoroutines(coroutines int) error {
+	if coroutines < 1 || coroutines > 16 {
+		return errors.Errorf("coroutines %d out of range 1-16", coroutines)
+	}
+	convertCoroutines = coroutines
+	return nil
+}
 
 type TIONiceLevel int
 
@@ -49,6 +64,23 @@ const (
 	IONiceBestEffort = TIONiceLevel(2)
 	IONiceIdle       = TIONiceLevel(3)
 )
+
+const DefaultConvertCorutines = 8
+
+const DefaultQcow2ClusterSize = 65536
+
+var preallocation = "metadata"
+
+func SetPreallocation(prealloc string) error {
+	if !utils.IsInStringArray(prealloc, []string{"", "disable", "metadata", "falloc", "full"}) {
+		return errors.Errorf("unsupported preallocation %s", prealloc)
+	}
+	if prealloc == "disable" {
+		prealloc = ""
+	}
+	preallocation = prealloc
+	return nil
+}
 
 type SQemuImage struct {
 	Path            string
@@ -101,7 +133,7 @@ func (img *SQemuImage) parse() error {
 		fileInfo, err := procutils.RemoteStat(img.Path)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				return err
+				return errors.Wrapf(err, "remote stat of %s", img.Path)
 			} else {
 				// not created yet
 				return nil
@@ -216,7 +248,7 @@ func (img *SQemuImage) parse() error {
 	if img.Format == qemuimgfmt.RAW && fileutils2.IsFile(img.Path) && fileutils2.IsIsoFile(img.Path) {
 		img.Format = qemuimgfmt.ISO
 	}
-	if img.Format == qemuimgfmt.RAW && fileutils2.IsFile(img.Path) && fileutils2.IsTarGzipFile(img.Path) {
+	if img.Format == qemuimgfmt.RAW && fileutils2.IsFile(img.Path) && (fileutils2.IsTarGzipFile(img.Path) || fileutils2.IsTarFile(img.Path)) {
 		img.Format = imageapi.IMAGE_DISK_FORMAT_TGZ
 	}
 	return nil
@@ -258,10 +290,11 @@ const (
 )
 
 type SImageInfo struct {
-	Path     string
-	Format   qemuimgfmt.TImageFormat
-	IoLevel  TIONiceLevel
-	Password string
+	Path        string
+	Format      qemuimgfmt.TImageFormat
+	IoLevel     TIONiceLevel
+	Password    string
+	ClusterSize int
 
 	// only luks supported
 	EncryptFormat TEncryptFormat
@@ -344,13 +377,36 @@ func convertOther(srcInfo, destInfo SImageInfo, compact bool, workerOpions []str
 	} else {
 		cmdline = append(cmdline, workerOpions...)
 	}
+
+	if !utils.IsInStringArray("-W", workerOpions) && !convertWorkInOrder {
+		cmdline = append(cmdline, "-W")
+	}
+	if !utils.IsInStringArray("-m", workerOpions) && convertCoroutines != DefaultConvertCorutines {
+		cmdline = append(cmdline, "-m", strconv.Itoa(convertCoroutines))
+	}
+
 	if compact {
 		cmdline = append(cmdline, "-c")
+		if destInfo.ClusterSize <= 0 {
+			destInfo.ClusterSize = DefaultQcow2ClusterSize
+		}
 	}
 	cmdline = append(cmdline, "-f", srcInfo.Format.String(), "-O", destInfo.Format.String())
+
+	options := []string{}
 	if destInfo.Format.String() == "vmdk" { // for esxi vmdk
-		cmdline = append(cmdline, "-o")
-		cmdline = append(cmdline, vmdkOptions(compact)...)
+		options = append(options, vmdkOptions(compact)...)
+	}
+	if destInfo.Format == qemuimgfmt.QCOW2 {
+		if destInfo.ClusterSize > 0 {
+			options = append(options, fmt.Sprintf("cluster_size=%d", destInfo.ClusterSize))
+		} else if srcInfo.ClusterSize > 0 {
+			options = append(options, fmt.Sprintf("cluster_size=%d", srcInfo.ClusterSize))
+		}
+	}
+
+	if len(options) > 0 {
+		cmdline = append(cmdline, "-o", strings.Join(options, ","))
 	}
 	cmdline = append(cmdline, srcInfo.Path, destInfo.Path)
 	log.Infof("XXXX qemu-img command: %s", cmdline)
@@ -376,10 +432,13 @@ func convertEncrypt(srcInfo, destInfo SImageInfo, compact bool, workerOpions []s
 	if err != nil {
 		return errors.Wrapf(err, "NewQemuImage dest %s", destInfo.Path)
 	}
-	err = target.CreateQcow2(source.GetSizeMB(), compact, "", destInfo.Password, destInfo.EncryptFormat, destInfo.EncryptAlg)
-	if err != nil {
-		return errors.Wrapf(err, "Create target image %s", destInfo.Path)
+	if target.Format != qemuimgfmt.QCOW2 {
+		err = target.CreateQcow2(source.GetSizeMB(), compact, "", destInfo.Password, destInfo.EncryptFormat, destInfo.EncryptAlg)
+		if err != nil {
+			return errors.Wrapf(err, "Create target image %s", destInfo.Path)
+		}
 	}
+
 	cmdline := []string{"-c", strconv.Itoa(int(srcInfo.IoLevel)), qemutils.GetQemuImg(), "convert"}
 	if compact {
 		cmdline = append(cmdline, "-c")
@@ -393,6 +452,14 @@ func convertEncrypt(srcInfo, destInfo SImageInfo, compact bool, workerOpions []s
 	} else {
 		cmdline = append(cmdline, workerOpions...)
 	}
+
+	if !utils.IsInStringArray("-W", workerOpions) && !convertWorkInOrder {
+		cmdline = append(cmdline, "-W")
+	}
+	if !utils.IsInStringArray("-m", workerOpions) && convertCoroutines != DefaultConvertCorutines {
+		cmdline = append(cmdline, "-m", strconv.Itoa(convertCoroutines))
+	}
+
 	if srcInfo.Encrypted() {
 		if srcInfo.Format != qemuimgfmt.QCOW2 {
 			return errors.Wrap(errors.ErrNotSupported, "source image not support encryption")
@@ -444,6 +511,10 @@ func (img *SQemuImage) doConvert(targetPath string, format qemuimgfmt.TImageForm
 	if !img.IsValid() {
 		return fmt.Errorf("self is not valid")
 	}
+	destClusterSize := img.ClusterSize
+	if compact {
+		destClusterSize = DefaultQcow2ClusterSize
+	}
 	return Convert(SImageInfo{
 		Path:     img.Path,
 		Format:   img.Format,
@@ -452,6 +523,7 @@ func (img *SQemuImage) doConvert(targetPath string, format qemuimgfmt.TImageForm
 
 		EncryptFormat: img.EncryptFormat,
 		EncryptAlg:    img.EncryptAlg,
+		ClusterSize:   img.ClusterSize,
 	}, SImageInfo{
 		Path:     targetPath,
 		Format:   format,
@@ -459,6 +531,7 @@ func (img *SQemuImage) doConvert(targetPath string, format qemuimgfmt.TImageForm
 
 		EncryptFormat: encryptFormat,
 		EncryptAlg:    encryptAlg,
+		ClusterSize:   destClusterSize,
 	}, compact, nil)
 }
 
@@ -703,8 +776,10 @@ func (img *SQemuImage) CreateQcow2(sizeMB int, compact bool, backPath string, pa
 		}
 	} else if !compact {
 		sparseOpts := qcow2SparseOptions()
-		if sizeMB <= 1024*1024*4 {
-			options = append(options, "preallocation=metadata")
+		if preallocation != "" {
+			if sizeMB <= 1024*1024*4 {
+				options = append(options, fmt.Sprintf("preallocation=%s", preallocation))
+			}
 		}
 		options = append(options, sparseOpts...)
 	}

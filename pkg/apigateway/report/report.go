@@ -21,6 +21,9 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
@@ -75,9 +78,11 @@ type sReport struct {
 }
 
 const (
-	RUNNING_ENV_KUBERNETES     = "kubernetes"
-	RUNNING_ENV_DOCKER_COMPOSE = "docker-compose"
-	RUNNING_ENV_UNKNOWN        = "unknown"
+	RUNNING_ENV_KUBERNETES               = "kubernetes"
+	RUNNING_ENV_K3S                      = "k3s"
+	RUNNING_ENV_DOCKER_COMPOSE           = "docker-compose"
+	RUNNING_ENV_DOCKER_COMPOSE_BAREMETAL = "docker-compose-baremetal"
+	RUNNING_ENV_UNKNOWN                  = "unknown"
 )
 
 func isInsideDockerCompose() bool {
@@ -117,12 +122,48 @@ func isInsideKubernetes() bool {
 	return true
 }
 
+func getK8sVersion() (string, error) {
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		return "", errors.Wrap(err, "get k8s config")
+	}
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return "", errors.Wrap(err, "get k8s client")
+	}
+	ver, err := client.ServerVersion()
+	if err != nil {
+		return "", errors.Wrap(err, "get k8s version")
+	}
+	return ver.String(), nil
+}
+
 func getRunningEnv() string {
 	if isInsideKubernetes() {
+		ver, err := getK8sVersion()
+		if err != nil {
+			log.Errorf("get k8s version: %v", err)
+		}
+		if strings.Contains(ver, "k3s") {
+			return RUNNING_ENV_K3S
+		}
 		return RUNNING_ENV_KUBERNETES
 	}
 
 	if isInsideDockerCompose() {
+		// list agent to check whether we're running baremetal agent
+		s := auth.GetAdminSession(context.Background(), options.Options.Region)
+		ret, err := compute.Baremetalagents.List(s, nil)
+		if err != nil {
+			log.Warningf("list agents error: %s", err)
+			return RUNNING_ENV_DOCKER_COMPOSE
+		}
+		for _, agent := range ret.Data {
+			aType, _ := agent.GetString("agent_type")
+			if aType == "baremetal" {
+				return RUNNING_ENV_DOCKER_COMPOSE_BAREMETAL
+			}
+		}
 		return RUNNING_ENV_DOCKER_COMPOSE
 	}
 	return RUNNING_ENV_UNKNOWN

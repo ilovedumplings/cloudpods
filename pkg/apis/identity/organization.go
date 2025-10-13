@@ -79,14 +79,14 @@ type OrganizationCreateInput struct {
 
 	Type TOrgType `json:"type"`
 
-	// swagger: ignore
+	// swagger:ignore
 	Level int `json:"level,omitzero"`
 
 	// key
 	Key []string `json:"key"`
 
 	// keys
-	// swagger: ignore
+	// swagger:ignore
 	Keys string `json:"keys"`
 }
 
@@ -219,6 +219,13 @@ type SOrganizationNodeDetails struct {
 	Organization string `json:"organization"`
 
 	Type TOrgType `json:"type"`
+}
+
+type SOrganizationDetails struct {
+	EnabledIdentityBaseResourceDetails
+	apis.SharableResourceBaseInfo
+
+	SOrganization
 }
 
 type OrganizationPerformCleanInput struct {

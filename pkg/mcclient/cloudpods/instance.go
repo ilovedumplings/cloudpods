@@ -30,7 +30,6 @@ import (
 	modules "yunion.io/x/onecloud/pkg/mcclient/modules/compute"
 	"yunion.io/x/onecloud/pkg/mcclient/modules/identity"
 	"yunion.io/x/onecloud/pkg/mcclient/modules/logger"
-	"yunion.io/x/onecloud/pkg/mcclient/modules/monitor"
 	"yunion.io/x/onecloud/pkg/mcclient/modules/webconsole"
 )
 
@@ -212,7 +211,7 @@ func (self *SInstance) SetSecurityGroups(ids []string) error {
 }
 
 func (self *SInstance) GetHypervisor() string {
-	return api.HYPERVISOR_CLOUDPODS
+	return self.Hypervisor
 }
 
 func (self *SInstance) StartVM(ctx context.Context) error {
@@ -295,7 +294,11 @@ func (self *SInstance) DeployVM(ctx context.Context, opts *cloudprovider.SInstan
 	if err != nil {
 		return errors.Wrapf(err, "deploy")
 	}
-	return cloudprovider.WaitMultiStatus(self, []string{api.VM_READY, api.VM_RUNNING}, time.Second*5, time.Minute*3)
+	timeout := time.Minute * 3
+	if self.Hypervisor == api.HYPERVISOR_BAREMETAL {
+		timeout = time.Minute * 10
+	}
+	return cloudprovider.WaitMultiStatus(self, []string{api.VM_READY, api.VM_RUNNING}, time.Second*5, timeout)
 }
 
 func (self *SInstance) ChangeConfig(ctx context.Context, opts *cloudprovider.SManagedVMChangeConfig) error {
@@ -321,7 +324,7 @@ func (self *SRegion) GetInstanceVnc(id, name string) (*cloudprovider.ServerVncOu
 		Protocol:     "cloudpods",
 		InstanceId:   id,
 		InstanceName: name,
-		Hypervisor:   api.HYPERVISOR_CLOUDPODS,
+		Hypervisor:   api.HYPERVISOR_DEFAULT,
 	}
 	err = resp.Unmarshal(&result)
 	if err != nil {
@@ -353,6 +356,7 @@ func (self *SInstance) DetachDisk(ctx context.Context, diskId string) error {
 func (self *SInstance) MigrateVM(hostId string) error {
 	input := api.GuestMigrateInput{}
 	input.PreferHost = hostId
+	input.PreferHostId = hostId
 	_, err := self.host.zone.region.perform(&modules.Servers, self.Id, "migrate", input)
 	return err
 }
@@ -360,8 +364,10 @@ func (self *SInstance) MigrateVM(hostId string) error {
 func (self *SInstance) LiveMigrateVM(hostId string) error {
 	input := api.GuestLiveMigrateInput{}
 	input.PreferHost = hostId
-	skipCpuCheck := true
-	input.SkipCpuCheck = &skipCpuCheck
+	input.PreferHostId = hostId
+	skipCheck := true
+	input.SkipCpuCheck = &skipCheck
+	input.SkipKernelCheck = &skipCheck
 	_, err := self.host.zone.region.perform(&modules.Servers, self.Id, "live-migrate", input)
 	return err
 }
@@ -391,7 +397,7 @@ func (self *SInstance) GetError() error {
 		actions := []apis.OpsLogDetails{}
 		self.host.zone.region.list(&logger.Actions, params, &actions)
 		if len(actions) > 0 {
-			return fmt.Errorf(actions[0].Notes)
+			return fmt.Errorf("%s", actions[0].Notes)
 		}
 		return fmt.Errorf("vm create failed with status %s", self.Status)
 	}
@@ -482,6 +488,7 @@ func (self *SRegion) GetInstances(hostId string) ([]SInstance, error) {
 	if len(hostId) > 0 {
 		params["host_id"] = hostId
 	}
+	params["filter"] = fmt.Sprintf("hypervisor.in('kvm', 'baremetal')")
 	ret := []SInstance{}
 	return ret, self.list(&modules.Servers, params, &ret)
 }
@@ -490,13 +497,17 @@ func (self *SRegion) CreateInstance(hostId, hypervisor string, opts *cloudprovid
 	input := api.ServerCreateInput{
 		ServerConfigs: &api.ServerConfigs{},
 	}
-	input.Name = opts.Name
+	input.GenerateName = opts.Name
 	input.Hostname = opts.Hostname
 	input.Description = opts.Description
 	input.InstanceType = opts.InstanceType
 	input.VcpuCount = opts.Cpu
 	input.VmemSize = opts.MemoryMB
 	input.Password = opts.Password
+	if len(input.Password) == 0 {
+		resetPasswd := false
+		input.ResetPassword = &resetPasswd
+	}
 	input.PublicIpBw = opts.PublicIpBw
 	input.PublicIpChargeType = string(opts.PublicIpChargeType)
 	input.ProjectId = opts.ProjectId
@@ -511,9 +522,18 @@ func (self *SRegion) CreateInstance(hostId, hypervisor string, opts *cloudprovid
 	if opts.BillingCycle != nil {
 		input.Duration = opts.BillingCycle.String()
 	}
+	image, err := self.GetImage(opts.ExternalImageId)
+	if err != nil {
+		return nil, errors.Wrapf(err, "GetImage")
+	}
+	imageId := opts.ExternalImageId
+	if image.DiskFormat == "iso" {
+		input.Cdrom = opts.ExternalImageId
+		imageId = ""
+	}
 	input.Disks = append(input.Disks, &api.DiskConfig{
 		Index:    0,
-		ImageId:  opts.ExternalImageId,
+		ImageId:  imageId,
 		DiskType: api.DISK_TYPE_SYS,
 		SizeMb:   opts.SysDisk.SizeGB * 1024,
 		Backend:  opts.SysDisk.StorageType,
@@ -528,6 +548,13 @@ func (self *SRegion) CreateInstance(hostId, hypervisor string, opts *cloudprovid
 			Storage:  disk.StorageExternalId,
 		})
 	}
+	input.IsolatedDevices = []*api.IsolatedDeviceConfig{}
+	for _, dev := range input.IsolatedDevices {
+		devConfig := &api.IsolatedDeviceConfig{
+			Id: dev.Id,
+		}
+		input.IsolatedDevices = append(input.IsolatedDevices, devConfig)
+	}
 	input.Networks = append(input.Networks, &api.NetworkConfig{
 		Index:   0,
 		Network: opts.ExternalNetworkId,
@@ -535,62 +562,6 @@ func (self *SRegion) CreateInstance(hostId, hypervisor string, opts *cloudprovid
 	})
 	ins := &SInstance{}
 	return ins, self.create(&modules.Servers, input, ins)
-}
-
-type SMetricData struct {
-	Id    string    `json:"id"`
-	Time  time.Time `json:"time"`
-	Value float64   `json:"value"`
-}
-
-func (cli *SCloudpodsClient) GetMetrics(opts *cloudprovider.MetricListOptions) ([]cloudprovider.MetricValues, error) {
-	brandArr := []string{"OneCloud", "VMware"}
-	metrics := []SMetricData{}
-	usefulResourceType := []cloudprovider.TResourceType{cloudprovider.METRIC_RESOURCE_TYPE_HOST, cloudprovider.METRIC_RESOURCE_TYPE_SERVER}
-	isUse, _ := utils.InArray(opts.ResourceType, usefulResourceType)
-	if !isUse {
-		return nil, nil
-	}
-	for i := 0; i < len(brandArr); i++ {
-		params := map[string]interface{}{
-			"metric_name": opts.MetricType,
-			"start_time":  opts.StartTime,
-			"end_time":    opts.EndTime,
-			"tag_pairs": map[string]interface{}{
-				"brand": brandArr[i],
-			},
-		}
-		onecloudObj, err := monitor.UnifiedMonitorManager.Get(cli.s, "simple-query", jsonutils.Marshal(params))
-		if err != nil {
-			return nil, err
-		}
-		tmp := []SMetricData{}
-		onecloudObj.Unmarshal(&tmp, "values")
-		metrics = append(metrics, tmp...)
-	}
-
-	idWithMetric := map[string][]cloudprovider.MetricValue{}
-	for _, v := range metrics {
-		if _, isExist := idWithMetric[v.Id]; !isExist {
-			idWithMetric[v.Id] = []cloudprovider.MetricValue{{
-				Timestamp: v.Time,
-				Value:     v.Value}}
-		} else {
-			idWithMetric[v.Id] = append(idWithMetric[v.Id], cloudprovider.MetricValue{
-				Timestamp: v.Time,
-				Value:     v.Value})
-		}
-	}
-
-	res := []cloudprovider.MetricValues{}
-	for _, metric := range metrics {
-		res = append(res, cloudprovider.MetricValues{
-			Id:         metric.Id,
-			MetricType: opts.MetricType,
-			Values:     idWithMetric[metric.Id],
-		})
-	}
-	return res, nil
 }
 
 func (self *SInstance) CreateDisk(ctx context.Context, opts *cloudprovider.GuestDiskCreateOptions) (string, error) {
@@ -630,4 +601,16 @@ func (self *SInstance) CreateDisk(ctx context.Context, opts *cloudprovider.Guest
 		return ret, nil
 	}
 	return "", errors.Wrapf(cloudprovider.ErrNotFound, "after disk created")
+}
+
+func (instance *SInstance) GetIsolateDeviceIds() ([]string, error) {
+	devs, err := instance.host.zone.region.GetIsolatedDevices("", instance.Id)
+	if err != nil {
+		return nil, err
+	}
+	ret := []string{}
+	for i := range devs {
+		ret = append(ret, devs[i].GetGlobalId())
+	}
+	return ret, nil
 }

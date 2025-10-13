@@ -198,7 +198,7 @@ func (self *SInstance) GetName() string {
 }
 
 func (self *SInstance) GetHostname() string {
-	return self.GetName()
+	return ""
 }
 
 func (self *SInstance) GetGlobalId() string {
@@ -492,34 +492,8 @@ func (self *SInstance) RebuildRoot(ctx context.Context, desc *cloudprovider.SMan
 	return instance.SystemDisk.DiskId, nil
 }
 
-func (self *SInstance) ChangeConfig(ctx context.Context, config *cloudprovider.SManagedVMChangeConfig) error {
-	instanceTypes := []string{}
-	if len(config.InstanceType) > 0 {
-		instanceTypes = []string{config.InstanceType}
-	} else {
-		specs, err := self.host.zone.region.GetMatchInstanceTypes(config.Cpu, config.MemoryMB, 0, self.Placement.Zone)
-		if err != nil {
-			return errors.Wrapf(err, "GetMatchInstanceTypes")
-		}
-		for _, spec := range specs {
-			instanceTypes = append(instanceTypes, spec.InstanceType)
-		}
-	}
-
-	var err error
-	for _, instanceType := range instanceTypes {
-		err = self.host.zone.region.ChangeVMConfig(self.InstanceId, instanceType)
-		if err != nil {
-			log.Errorf("ChangeConfig for %s with %s error: %v", self.InstanceId, instanceType, err)
-			continue
-		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-
-	return fmt.Errorf("Failed to change vm config, specification not supported")
+func (self *SInstance) ChangeConfig(ctx context.Context, opts *cloudprovider.SManagedVMChangeConfig) error {
+	return self.host.zone.region.ChangeVMConfig(self.InstanceId, opts.InstanceType)
 }
 
 func (self *SInstance) AttachDisk(ctx context.Context, diskId string) error {
@@ -935,6 +909,30 @@ func (self *SInstance) GetBillingType() string {
 	default:
 		return billing_api.BILLING_TYPE_PREPAID
 	}
+}
+
+func (self *SInstance) ChangeBillingType(billingType string) error {
+	return self.host.zone.region.ModifyInstanceChargeType(self.InstanceId, billingType)
+}
+
+func (region *SRegion) ModifyInstanceChargeType(vmId string, billingType string) error {
+	params := map[string]string{
+		"Region":                 region.Region,
+		"ModifyPortableDataDisk": "true",
+		"InstanceIds.0":          vmId,
+	}
+	switch billingType {
+	case billing_api.BILLING_TYPE_POSTPAID:
+		params["InstanceChargeType"] = "POSTPAID_BY_HOUR"
+	case billing_api.BILLING_TYPE_PREPAID:
+		params["InstanceChargeType"] = "PREPAID"
+		params["InstanceChargePrepaid.Period"] = "1"
+		params["InstanceChargePrepaid.RenewFlag"] = "NOTIFY_AND_AUTO_RENEW"
+	default:
+		return fmt.Errorf("invalid billing_type %s", billingType)
+	}
+	_, err := region.cvmRequest("ModifyInstancesChargeType", params, false)
+	return err
 }
 
 func (self *SInstance) GetCreatedAt() time.Time {

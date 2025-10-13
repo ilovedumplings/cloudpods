@@ -253,8 +253,6 @@ func (self *SInstance) GetIDisks() ([]cloudprovider.ICloudDisk, error) {
 
 	sort.Sort(byAttachedTime(disks))
 
-	log.Debugf("%s", jsonutils.Marshal(&disks))
-
 	idisks := make([]cloudprovider.ICloudDisk, len(disks))
 	for i := 0; i < len(disks); i += 1 {
 		store, err := self.host.zone.getStorageByCategory(disks[i].Category)
@@ -557,7 +555,7 @@ func (self *SRegion) GetInstance(instanceId string) (*SInstance, error) {
 			return &instances[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, instanceId)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", instanceId)
 }
 
 func (self *SRegion) CreateInstance(name, hostname string, imageId string, instanceType string, securityGroupIds []string,
@@ -874,7 +872,12 @@ func (self *SRegion) UpdateVM(instanceId string, input cloudprovider.SInstanceUp
 	*/
 	params := make(map[string]string)
 	params["InstanceName"] = input.NAME
-	params["Description"] = input.Description
+	if len(input.HostName) > 0 {
+		params["HostName"] = input.HostName
+	}
+	if len(input.Description) > 0 {
+		params["Description"] = input.Description
+	}
 	return self.modifyInstanceAttribute(instanceId, params)
 }
 
@@ -988,6 +991,53 @@ func (self *SInstance) SetSecurityGroups(secgroupIds []string) error {
 
 func (self *SInstance) GetBillingType() string {
 	return convertChargeType(self.InstanceChargeType)
+}
+
+func (self *SInstance) ChangeBillingType(billingType string) error {
+	return self.host.zone.region.ModifyInstanceChargeType(self.InstanceId, billingType)
+}
+
+func (region *SRegion) ModifyInstanceChargeType(vmId string, billingType string) error {
+	params := map[string]string{
+		"RegionId":         region.RegionId,
+		"IncludeDataDisks": "true",
+		"AutoPay":          "true",
+		"ClientToken":      utils.GenRequestId(20),
+		"InstanceIds":      jsonutils.Marshal([]string{vmId}).String(),
+	}
+	switch billingType {
+	case billing_api.BILLING_TYPE_POSTPAID:
+		params["InstanceChargeType"] = "PostPaid"
+	case billing_api.BILLING_TYPE_PREPAID:
+		params["InstanceChargeType"] = "PrePaid"
+		params["Period"] = "1"
+		params["PeriodUnit"] = "Month"
+	default:
+		return fmt.Errorf("invalid billing_type %s", billingType)
+	}
+	_, err := region.ecsRequest("ModifyInstanceChargeType", params)
+	if err != nil {
+		return err
+	}
+	if billingType == billing_api.BILLING_TYPE_PREPAID {
+		cycle := billing.SBillingCycle{
+			AutoRenew: true,
+			Count:     1,
+			Unit:      billing.BillingCycleMonth,
+		}
+		err = cloudprovider.Wait(time.Second*10, time.Minute*3, func() (bool, error) {
+			err = region.SetInstanceAutoRenew(vmId, cycle)
+			if err != nil {
+				log.Errorf("set auto renew for instance %s error: %v", vmId, err)
+				return false, nil
+			}
+			return true, nil
+		})
+		if err != nil {
+			log.Errorf("set auto renew for %s error: %v", vmId, err)
+		}
+	}
+	return nil
 }
 
 func (self *SInstance) GetCreatedAt() time.Time {

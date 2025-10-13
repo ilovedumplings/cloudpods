@@ -43,6 +43,10 @@ func (f *ImagePredicate) Clone() core.FitPredicate {
 }
 
 func (f *ImagePredicate) PreExecute(ctx context.Context, u *core.Unit, cs []core.Candidater) (bool, error) {
+	if u.SchedData().ResetCpuNumaPin {
+		return false, nil
+	}
+
 	disks := u.SchedData().Disks
 	if len(disks) == 0 {
 		return false, nil
@@ -51,7 +55,7 @@ func (f *ImagePredicate) PreExecute(ctx context.Context, u *core.Unit, cs []core
 	if len(imageId) == 0 || u.SchedData().PreferZone != "" {
 		return false, nil
 	}
-	if !utils.IsInStringArray(u.SchedData().Hypervisor, compute.PUBLIC_CLOUD_HYPERVISORS) && !utils.IsInStringArray(u.SchedData().Hypervisor, compute.PRIVATE_CLOUD_HYPERVISORS) {
+	if !utils.IsInStringArray(u.SchedData().Provider, compute.PUBLIC_CLOUD_PROVIDERS) && !utils.IsInStringArray(u.SchedData().Provider, compute.PRIVATE_CLOUD_PROVIDERS) {
 		return false, nil
 	}
 	obj, err := models.CachedimageManager.FetchById(imageId)

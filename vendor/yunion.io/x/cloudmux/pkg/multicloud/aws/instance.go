@@ -223,7 +223,7 @@ func (self *SInstance) GetName() string {
 }
 
 func (self *SInstance) GetHostname() string {
-	return self.GetName()
+	return ""
 }
 
 func (self *SInstance) GetGlobalId() string {
@@ -246,11 +246,14 @@ func (self *SInstance) GetStatus() string {
 }
 
 func (self *SInstance) Refresh() error {
-	new, err := self.host.zone.region.GetInstance(self.InstanceId)
+	vm, err := self.host.zone.region.GetInstance(self.InstanceId)
 	if err != nil {
 		return err
 	}
-	return jsonutils.Update(self, new)
+	self.BlockDeviceMappings = nil
+	self.NetworkInterfaces = nil
+	self.SecurityGroups = nil
+	return jsonutils.Update(self, vm)
 }
 
 func (self *SInstance) GetInstanceType() string {
@@ -295,16 +298,21 @@ func (self *SInstance) GetIDisks() ([]cloudprovider.ICloudDisk, error) {
 		return nil, errors.Wrap(err, "GetDisks")
 	}
 
-	idisks := make([]cloudprovider.ICloudDisk, len(disks))
+	ret := []cloudprovider.ICloudDisk{}
 	for i := 0; i < len(disks); i += 1 {
 		store, err := self.host.zone.getStorageByCategory(disks[i].VolumeType)
 		if err != nil {
 			return nil, errors.Wrap(err, "getStorageByCategory")
 		}
 		disks[i].storage = store
-		idisks[i] = &disks[i]
+		if disks[i].getDevice() == self.RootDeviceName {
+			ret = append([]cloudprovider.ICloudDisk{&disks[i]}, ret...)
+		} else {
+			ret = append(ret, &disks[i])
+		}
 	}
-	return idisks, nil
+
+	return ret, nil
 }
 
 func (self *SInstance) GetINics() ([]cloudprovider.ICloudNic, error) {
@@ -565,7 +573,7 @@ func (self *SInstance) RebuildRoot(ctx context.Context, desc *cloudprovider.SMan
 
 	cloudconfig := &cloudinit.SCloudConfig{}
 	if srcOsType != winOS && len(udata) > 0 {
-		_cloudconfig, err := cloudinit.ParseUserDataBase64(udata)
+		_cloudconfig, err := cloudinit.ParseUserData(udata)
 		if err != nil {
 			// 忽略无效的用户数据
 			log.Debugf("RebuildRoot invalid instance user data %s", udata)
@@ -654,11 +662,15 @@ func (self *SInstance) AttachDisk(ctx context.Context, diskId string) error {
 		return errors.Wrap(err, "GetImage")
 	}
 
-	deviceNames := []string{}
-	// mix in image block device names
-	for i := range img.BlockDeviceMapping {
-		if !utils.IsInStringArray(img.BlockDeviceMapping[i].DeviceName, deviceNames) {
-			deviceNames = append(deviceNames, img.BlockDeviceMapping[i].DeviceName)
+	err = self.Refresh()
+	if err != nil {
+		return err
+	}
+
+	deviceNames := img.GetBlockDeviceNames()
+	for _, dev := range self.BlockDeviceMappings {
+		if dev.DeviceName != nil && len(*dev.DeviceName) > 0 {
+			deviceNames = append(deviceNames, *dev.DeviceName)
 		}
 	}
 
@@ -738,7 +750,7 @@ func (self *SRegion) GetInstance(instanceId string) (*SInstance, error) {
 			return &instances[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, instanceId)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", instanceId)
 }
 
 func (self *SRegion) GetInstanceIdByImageId(imageId string) (string, error) {
@@ -756,18 +768,20 @@ func (self *SRegion) CreateInstance(name string, image *SImage, instanceType str
 	zoneId string, desc string, disks []cloudprovider.SDiskInfo, ipAddr string,
 	keypair string, userData string, tags map[string]string, enableMonitorAgent bool,
 ) (*SInstance, error) {
-	params := map[string]string{}
+	params, devNames := map[string]string{}, image.GetBlockDeviceNames()
 	for i, disk := range disks {
 		deviceName := image.RootDeviceName
 		if i == 0 && len(deviceName) == 0 {
 			deviceName = "/dev/sda1"
+			devNames = append(devNames, deviceName)
 		}
 		if i > 0 {
 			var err error
-			deviceName, err = NextDeviceName(image.GetBlockDeviceNames())
+			deviceName, err = NextDeviceName(devNames)
 			if err != nil {
 				return nil, errors.Wrapf(err, "NextDeviceName")
 			}
+			devNames = append(devNames, deviceName)
 		}
 		params[fmt.Sprintf("BlockDeviceMapping.%d.DeviceName", i+1)] = deviceName
 		params[fmt.Sprintf("BlockDeviceMapping.%d.Ebs.DeleteOnTermination", i+1)] = "true"
@@ -804,6 +818,15 @@ func (self *SRegion) CreateInstance(name string, image *SImage, instanceType str
 		params[fmt.Sprintf("TagSpecification.1.Tag.%d.Value", tagIdx)] = v
 		tagIdx++
 	}
+
+	tagIdx = 1
+	for k, v := range tags {
+		params[fmt.Sprintf("TagSpecification.2.ResourceType")] = "volume"
+		params[fmt.Sprintf("TagSpecification.2.Tag.%d.Key", tagIdx)] = k
+		params[fmt.Sprintf("TagSpecification.2.Tag.%d.Value", tagIdx)] = v
+		tagIdx++
+	}
+
 	params["ImageId"] = image.ImageId
 	params["InstanceType"] = instanceType
 	params["MaxCount"] = "1"
@@ -895,7 +918,7 @@ func (self *SRegion) ReplaceSystemDisk(ctx context.Context, instanceId string, i
 
 	var rootDisk *SDisk
 	for _, disk := range disks {
-		if disk.GetDiskType() == api.DISK_TYPE_SYS {
+		if disk.getDevice() == instance.RootDeviceName {
 			rootDisk = &disk
 			break
 		}
@@ -930,32 +953,40 @@ func (self *SRegion) ReplaceSystemDisk(ctx context.Context, instanceId string, i
 		return "", fmt.Errorf("ReplaceSystemDisk create temp server failed.")
 	}
 
-	cloudprovider.Wait(time.Second*2, time.Minute*3, func() (bool, error) {
+	err = cloudprovider.Wait(time.Second*2, time.Minute*10, func() (bool, error) {
 		instance, err := self.GetInstance(vm.InstanceId)
 		if err != nil {
 			return false, errors.Wrapf(err, "GetInstance")
 		}
+		log.Debugf("wait temp vm %s running, current status: %s", vm.InstanceId, instance.GetStatus())
 		if instance.GetStatus() == api.VM_RUNNING {
 			return true, nil
 		}
 		return false, nil
 	})
+	if err != nil {
+		log.Errorf("wait temp vm %s running error: %v", vm.InstanceId, err)
+	}
 
 	err = self.StopVM(vm.InstanceId, true)
 	if err != nil {
 		return "", errors.Wrapf(err, "StopVM")
 	}
 
-	cloudprovider.Wait(time.Second*2, time.Minute*3, func() (bool, error) {
+	err = cloudprovider.Wait(time.Second*2, time.Minute*10, func() (bool, error) {
 		instance, err := self.GetInstance(vm.InstanceId)
 		if err != nil {
 			return false, errors.Wrapf(err, "GetInstance")
 		}
+		log.Debugf("wait temp vm %s stop, current status: %s", vm.InstanceId, instance.GetStatus())
 		if instance.GetStatus() == api.VM_READY {
 			return true, nil
 		}
 		return false, nil
 	})
+	if err != nil {
+		log.Errorf("wait temp vm %s stop error: %v", vm.InstanceId, err)
+	}
 
 	// detach disks
 	tempInstance, err := self.GetInstance(vm.InstanceId)
@@ -963,23 +994,30 @@ func (self *SRegion) ReplaceSystemDisk(ctx context.Context, instanceId string, i
 		return "", errors.Wrapf(err, "GetInstance")
 	}
 
+	tempRootDiskId := tempInstance.BlockDeviceMappings[0].Ebs.VolumeId
+
+	err = self.DetachDisk(tempInstance.GetId(), tempRootDiskId)
+	if err != nil {
+		return "", errors.Wrapf(err, "DetachDisk temp vm")
+	}
+
 	err = self.DetachDisk(instance.GetId(), rootDisk.VolumeId)
 	if err != nil {
+		self.DeleteDisk(tempRootDiskId)
 		return "", errors.Wrapf(err, "DetachDisk")
 	}
 
-	err = self.DetachDisk(tempInstance.GetId(), tempInstance.BlockDeviceMappings[0].Ebs.VolumeId)
+	err = self.AttachDisk(instance.GetId(), tempRootDiskId, rootDisk.getDevice())
 	if err != nil {
-		return "", errors.Wrapf(err, "DetachDisk")
-	}
-
-	err = self.AttachDisk(instance.GetId(), tempInstance.BlockDeviceMappings[0].Ebs.VolumeId, rootDisk.getDevice())
-	if err != nil {
+		self.DeleteDisk(tempRootDiskId)
+		self.AttachDisk(instance.GetId(), rootDisk.VolumeId, rootDisk.getDevice())
 		return "", errors.Wrapf(err, "ttachDisk")
 	}
 
 	err = self.ModifyInstanceAttribute(instance.InstanceId, &SInstanceAttr{UserData: userdata})
 	if err != nil {
+		self.DeleteDisk(tempRootDiskId)
+		self.AttachDisk(instance.GetId(), rootDisk.VolumeId, rootDisk.getDevice())
 		return "", errors.Wrapf(err, "ModifyInstanceAttribute")
 	}
 
@@ -987,7 +1025,7 @@ func (self *SRegion) ReplaceSystemDisk(ctx context.Context, instanceId string, i
 	if err != nil {
 		log.Errorf("DeleteDisk %s", rootDisk.VolumeId)
 	}
-	return tempInstance.BlockDeviceMappings[0].Ebs.VolumeId, nil
+	return tempRootDiskId, nil
 }
 
 func (self *SRegion) ChangeVMConfig2(instanceId string, instanceType string) error {
@@ -1082,7 +1120,7 @@ func (self *SInstance) SetTags(tags map[string]string, replace bool) error {
 func (self *SInstance) GetAccountId() string {
 	identity, err := self.host.zone.region.client.GetCallerIdentity()
 	if err != nil {
-		log.Errorf(err.Error() + "self.region.client.GetCallerIdentity()")
+		log.Errorf("GetCallerIdentity %v", err)
 		return ""
 	}
 	return identity.Account

@@ -42,6 +42,8 @@ import (
 	"yunion.io/x/onecloud/pkg/util/stringutils2"
 )
 
+// +onecloud:swagger-gen-model-singular=secgrouprule
+// +onecloud:swagger-gen-model-plural=secgrouprules
 type SSecurityGroupRuleManager struct {
 	db.SResourceBaseManager
 	db.SStatusResourceBaseManager
@@ -248,6 +250,15 @@ func (manager *SSecurityGroupRuleManager) QueryDistinctExtraField(q *sqlchemy.SQ
 		return q, nil
 	}
 
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SSecurityGroupRuleManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	var err error
+	q, err = manager.SSecurityGroupResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	if err == nil {
+		return q, nil
+	}
 	return q, httperrors.ErrNotFound
 }
 

@@ -22,6 +22,7 @@ import (
 	"yunion.io/x/pkg/util/qemuimgfmt"
 
 	"yunion.io/x/onecloud/pkg/apis"
+	api "yunion.io/x/onecloud/pkg/apis/compute"
 )
 
 var _ IDisk = (*SNVMEDisk)(nil)
@@ -38,16 +39,13 @@ func (d *SNVMEDisk) GetDiskDesc() jsonutils.JSONObject {
 	var desc = jsonutils.NewDict()
 
 	desc.Set("disk_id", jsonutils.NewString(d.Id))
-	desc.Set("disk_size", jsonutils.NewInt(int64(d.Storage.GetCapacity())))
+	desc.Set("disk_size", jsonutils.NewInt(int64(d.Storage.GetCapacityMb())))
 	desc.Set("format", jsonutils.NewString(string(qemuimgfmt.RAW)))
 	desc.Set("disk_path", jsonutils.NewString(d.Storage.GetPath()))
 	return desc
 }
 
-func (d *SNVMEDisk) CreateRaw(
-	ctx context.Context, sizeMb int, diskFormat string, fsFormat string,
-	encryptInfo *apis.SEncryptInfo, diskId string, back string,
-) (jsonutils.JSONObject, error) {
+func (d *SNVMEDisk) CreateRaw(ctx context.Context, sizeMb int, diskFormat string, fsFormat string, fsFeatures *api.DiskFsFeatures, encryptInfo *apis.SEncryptInfo, diskId string, back string) (jsonutils.JSONObject, error) {
 	// do nothing
 	return nil, nil
 }

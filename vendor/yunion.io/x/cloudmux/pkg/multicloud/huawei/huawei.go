@@ -22,14 +22,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/huaweicloud/huaweicloud-sdk-go/auth/aksk"
-
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/gotypes"
 	"yunion.io/x/pkg/util/httputils"
 	"yunion.io/x/pkg/util/timeutils"
+	"yunion.io/x/pkg/utils"
 
 	api "yunion.io/x/cloudmux/pkg/apis/compute"
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
@@ -51,6 +50,7 @@ const (
 	SERVICE_VPC                = "vpc"
 	SERVICE_VPC_V2_0           = "vpc_v2.0"
 	SERVICE_VPC_V3             = "vpc_v3"
+	SERVICE_VPN                = "vpn"
 	SERVICE_CES                = "ces"
 	SERVICE_RDS                = "rds"
 	SERVICE_ECS                = "ecs"
@@ -61,6 +61,7 @@ const (
 	SERVICE_EVS_V1             = "evs_v1"
 	SERVICE_EVS_V2_1           = "evs_v2.1"
 	SERVICE_BSS                = "bss"
+	SERVICE_BSS_INTL           = "bss-intl"
 	SERVICE_SFS                = "sfs-turbo"
 	SERVICE_CTS                = "cts"
 	SERVICE_NAT                = "nat"
@@ -78,9 +79,16 @@ const (
 	SERVICE_SCM                = "scm"
 	SERVICE_CDN                = "cdn"
 	SERVICE_GAUSSDB            = "gaussdb"
+	SERVICE_GAUSSDB_V3_1       = "gaussdb_v3.1"
 	SERVICE_GAUSSDB_NOSQL      = "gaussdb-nosql"
 	SERVICE_GAUSSDB_NOSQL_V3_1 = "gaussdb-nosql_v3.1"
+	SERVICE_GAUSSDB_OPENGAUSS  = "gaussdb-opengauss"
 	SERVICE_FUNCTIONGRAPH      = "functiongraph"
+	SERVICE_APIG               = "apig"
+	SERVICE_APIG_V1_0          = "apig_v1.0"
+	SERVICE_MRS                = "mrs"
+	SERVICE_DIS                = "dis"
+	SERVICE_LTS                = "lts"
 )
 
 type HuaweiClientConfig struct {
@@ -188,37 +196,80 @@ type sPageInfo struct {
 
 type akClient struct {
 	client *http.Client
-	aksk   aksk.SignOptions
+	aksk   Signer
 }
 
 func (self *akClient) Do(req *http.Request) (*http.Response, error) {
 	req.Header.Del("Accept")
 	length := req.Header.Get("Content-Length")
-	if req.Method == string(httputils.GET) ||
-		req.Method == string(httputils.DELETE) ||
-		(req.Method == string(httputils.PUT) && length == "0") ||
-		req.Method == string(httputils.PATCH) && !strings.HasPrefix(req.Host, "modelarts") ||
-		strings.HasSuffix(req.URL.Path, "disassociate-instance") {
+	if length == "0" {
 		req.Header.Del("Content-Length")
 	}
 	if strings.HasPrefix(req.Host, "modelarts") && req.Method == string(httputils.PATCH) {
 		req.Header.Set("Content-Type", "application/merge-patch+json")
 	}
-	aksk.Sign(req, self.aksk)
+	self.aksk.Sign(req)
 	return self.client.Do(req)
 }
 
 func (self *SHuaweiClient) getAkClient() *akClient {
 	return &akClient{
 		client: self.getDefaultClient(),
-		aksk: aksk.SignOptions{
-			AccessKey: self.accessKey,
-			SecretKey: self.accessSecret,
+		aksk: Signer{
+			Key:    self.accessKey,
+			Secret: self.accessSecret,
 		},
 	}
 }
 
-func (self *SHuaweiClient) request(method httputils.THttpMethod, regionId, url string, query url.Values, params map[string]interface{}) (jsonutils.JSONObject, error) {
+type sHuaweiError struct {
+	RequestId string `json:"request_id"`
+	ErrorMsg  string `json:"error_msg"`
+	ErrorCode string `json:"error_code"`
+	Code      string
+	Message   string
+	ErrorInfo struct {
+		Message string
+		Code    string
+		Title   string
+	} `json:"error"`
+	Errorcode  []string `json:"errorcode"`
+	ConvertMsg string
+	RawMsg     jsonutils.JSONObject
+}
+
+func (self *sHuaweiError) Error() string {
+	return jsonutils.Marshal(self).String()
+}
+
+// https://support.huaweicloud.com/api-iam/iam_02_0006.html
+var convertMsg = map[string]string{
+	"1101": "用户名校验失败,请检查用户名",
+	"1103": "密码校验失败,请检查密码",
+	"1104": "手机号校验失败,请检查手机号",
+	"1108": "新密码不能与原密码相同,请修改新密码",
+	"1109": "用户名已存在,请修改用户名",
+	"1118": "密码是弱密码,重新选择密码",
+}
+
+func (self *sHuaweiError) ParseErrorFromJsonResponse(statusCode int, status string, body jsonutils.JSONObject) error {
+	if body != nil {
+		body.Unmarshal(self)
+		// 特殊错误将返回原始错误信息
+		if self.Error() == jsonutils.Marshal(sHuaweiError{}).String() {
+			self.RawMsg = body
+		}
+	}
+	for _, code := range self.Errorcode {
+		self.ConvertMsg = convertMsg[code]
+	}
+	if statusCode == 404 {
+		return errors.Wrapf(cloudprovider.ErrNotFound, "%s", self.Error())
+	}
+	return self
+}
+
+func (self *SHuaweiClient) request(method httputils.THttpMethod, regionId, service, url string, query url.Values, params map[string]interface{}) (jsonutils.JSONObject, error) {
 	client := self.getAkClient()
 	if len(query) > 0 {
 		url = fmt.Sprintf("%s?%s", url, query.Encode())
@@ -230,27 +281,31 @@ func (self *SHuaweiClient) request(method httputils.THttpMethod, regionId, url s
 	header := http.Header{}
 
 	if project, ok := self.projects[regionId]; ok {
-		if len(project.Id) > 0 && !strings.Contains(url, "eps") {
+		if len(project.Id) > 0 && service != SERVICE_EPS {
 			header.Set("X-Project-Id", project.Id)
 		}
 	}
-	if (strings.Contains(url, "/OS-CREDENTIAL/") ||
+	if ((strings.Contains(url, "/OS-CREDENTIAL/") ||
 		strings.Contains(url, "/users") ||
 		strings.Contains(url, "/roles") ||
 		strings.Contains(url, "/mappings") ||
 		strings.Contains(url, "/identity_providers") ||
-		strings.Contains(url, "/groups") ||
-		strings.Contains(url, "eps.myhuaweicloud.com")) && len(self.ownerId) > 0 {
+		strings.Contains(url, "/groups") && (utils.IsInStringArray(service, []string{SERVICE_IAM, SERVICE_IAM_V3, SERVICE_IAM_V3_EXT}))) ||
+		service == SERVICE_EPS) && len(self.ownerId) > 0 {
 		header.Set("X-Domain-Id", self.ownerId)
 	}
-	_, resp, err := httputils.JSONRequest(client, context.Background(), method, url, header, body, self.debug)
+	req := httputils.NewJsonRequest(method, url, body)
+	req.SetHeader(header)
+	hwErr := &sHuaweiError{}
+	cli := httputils.NewJsonClient(client)
+	_, resp, err := cli.Send(context.Background(), req, hwErr, self.debug)
 	if err != nil {
-		if e, ok := err.(*httputils.JSONClientError); ok && e.Code == 404 {
-			return nil, errors.Wrapf(cloudprovider.ErrNotFound, err.Error())
-		}
 		return nil, err
 	}
-	return resp, err
+	if gotypes.IsNil(resp) {
+		return jsonutils.NewDict(), nil
+	}
+	return resp, nil
 }
 
 // https://console.huaweicloud.com/apiexplorer/#/openapi/IAM/doc?api=KeystoneListRegions
@@ -423,7 +478,7 @@ func (self *SHuaweiClient) GetIRegionById(id string) (cloudprovider.ICloudRegion
 			return regions[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 }
 
 func (self *SHuaweiClient) GetRegion(regionId string) *SRegion {
@@ -451,21 +506,31 @@ type SBalance struct {
 
 // https://console.huaweicloud.com/apiexplorer/#/openapi/BSS/doc?api=ShowCustomerAccountBalances
 func (self *SHuaweiClient) QueryAccountBalance() (*SBalance, error) {
-	resp, err := self.list(SERVICE_BSS, "", "accounts/customer-accounts/balances", nil)
-	if err != nil {
-		return nil, err
+	ret := struct {
+		AccountBalances []SBalance
+		Currency        string
+	}{}
+	for _, service := range []string{SERVICE_BSS, SERVICE_BSS_INTL} {
+		resp, err := self.list(service, "", "accounts/customer-accounts/balances", nil)
+		if err != nil {
+			// 国际区账号会报错: {"error_code":"CBC.0150","error_msg":"Access denied. The customer does not belong to the website you are now at."}
+			if e, ok := err.(*sHuaweiError); ok && (e.ErrorCode == "CBC.0150" || e.ErrorCode == "CBC.0156") {
+				continue
+			}
+			return nil, err
+		}
+		err = resp.Unmarshal(&ret)
+		if err != nil {
+			return nil, err
+		}
+		break
 	}
-	ret := []SBalance{}
-	err = resp.Unmarshal(&ret, "account_balances")
-	if err != nil {
-		return nil, err
-	}
-	for i := range ret {
-		if ret[i].AccountType == 1 {
-			return &ret[i], nil
+	for i := range ret.AccountBalances {
+		if ret.AccountBalances[i].AccountType == 1 {
+			return &ret.AccountBalances[i], nil
 		}
 	}
-	return &SBalance{Currency: "CYN"}, nil
+	return &SBalance{Currency: ret.Currency}, nil
 }
 
 func (self *SHuaweiClient) GetISSLCertificates() ([]cloudprovider.ICloudSSLCertificate, error) {
@@ -582,7 +647,7 @@ func (self *SHuaweiClient) list(service, regionId, resource string, query url.Va
 	if err != nil {
 		return nil, err
 	}
-	return self.request(httputils.GET, regionId, url, query, nil)
+	return self.request(httputils.GET, regionId, service, url, query, nil)
 }
 
 func (self *SHuaweiClient) delete(service, regionId, resource string) (jsonutils.JSONObject, error) {
@@ -590,7 +655,7 @@ func (self *SHuaweiClient) delete(service, regionId, resource string) (jsonutils
 	if err != nil {
 		return nil, err
 	}
-	return self.request(httputils.DELETE, regionId, url, nil, nil)
+	return self.request(httputils.DELETE, regionId, service, url, nil, nil)
 }
 
 func (self *SHuaweiClient) getUrl(service, regionId, resource string, method httputils.THttpMethod, params map[string]interface{}) (string, error) {
@@ -623,6 +688,8 @@ func (self *SHuaweiClient) getUrl(service, regionId, resource string, method htt
 		}
 	case SERVICE_VPC_V3:
 		url = fmt.Sprintf("https://vpc.%s.myhuaweicloud.com/v3/%s/%s", regionId, projectId, resource)
+	case SERVICE_VPN:
+		url = fmt.Sprintf("https://vpn.%s.myhuaweicloud.com/v5/%s/%s", regionId, projectId, resource)
 	case SERVICE_CES:
 		url = fmt.Sprintf("https://ces.%s.myhuaweicloud.com/V1.0/%s/%s", regionId, projectId, resource)
 	case SERVICE_MODELARTS:
@@ -645,8 +712,8 @@ func (self *SHuaweiClient) getUrl(service, regionId, resource string, method htt
 		url = fmt.Sprintf("https://evs.%s.myhuaweicloud.com/v2/%s/%s", regionId, projectId, resource)
 	case SERVICE_EVS_V2_1:
 		url = fmt.Sprintf("https://evs.%s.myhuaweicloud.com/v2.1/%s/%s", regionId, projectId, resource)
-	case SERVICE_BSS:
-		url = fmt.Sprintf("https://bss.myhuaweicloud.com/v2/%s", resource)
+	case SERVICE_BSS, SERVICE_BSS_INTL:
+		url = fmt.Sprintf("https://%s.myhuaweicloud.com/v2/%s", service, resource)
 	case SERVICE_SFS:
 		url = fmt.Sprintf("https://sfs-turbo.%s.myhuaweicloud.com/v1/%s/%s", regionId, projectId, resource)
 	case SERVICE_IMS:
@@ -667,10 +734,28 @@ func (self *SHuaweiClient) getUrl(service, regionId, resource string, method htt
 		url = fmt.Sprintf("https://cdn.myhuaweicloud.com/v1.0/%s", resource)
 	case SERVICE_GAUSSDB, SERVICE_GAUSSDB_NOSQL:
 		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v3/%s/%s", service, regionId, projectId, resource)
+	case SERVICE_GAUSSDB_V3_1:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v3.1/%s/%s", SERVICE_GAUSSDB, regionId, projectId, resource)
 	case SERVICE_GAUSSDB_NOSQL_V3_1:
 		url = fmt.Sprintf("https://gaussdb-nosql.%s.myhuaweicloud.com/v3.1/%s/%s", regionId, projectId, resource)
+	case SERVICE_GAUSSDB_OPENGAUSS:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v3.1/%s/%s", service, regionId, projectId, resource)
 	case SERVICE_FUNCTIONGRAPH:
 		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v2/%s/%s", service, regionId, projectId, resource)
+	case SERVICE_APIG:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v2/%s/%s", service, regionId, projectId, resource)
+	case SERVICE_APIG_V1_0:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v1.0/%s", SERVICE_APIG, regionId, resource)
+	case SERVICE_MRS:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v1.1/%s/%s", service, regionId, projectId, resource)
+	case SERVICE_DIS:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v2/%s/%s", service, regionId, projectId, resource)
+	case SERVICE_LTS:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/v2/%s/%s", service, regionId, projectId, resource)
+	case SERVICE_CCE:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/api/v3/projects/%s/%s", service, regionId, projectId, resource)
+	case SERVICE_AS:
+		url = fmt.Sprintf("https://%s.%s.myhuaweicloud.com/autoscaling-api/v1/%s/%s", service, regionId, projectId, resource)
 	default:
 		return "", fmt.Errorf("invalid service %s", service)
 	}
@@ -682,7 +767,7 @@ func (self *SHuaweiClient) post(service, regionId, resource string, params map[s
 	if err != nil {
 		return nil, err
 	}
-	return self.request(httputils.POST, regionId, url, nil, params)
+	return self.request(httputils.POST, regionId, service, url, nil, params)
 }
 
 func (self *SHuaweiClient) patch(service, regionId, resource string, query url.Values, params map[string]interface{}) (jsonutils.JSONObject, error) {
@@ -690,7 +775,7 @@ func (self *SHuaweiClient) patch(service, regionId, resource string, query url.V
 	if err != nil {
 		return nil, err
 	}
-	return self.request(httputils.PATCH, regionId, url, query, params)
+	return self.request(httputils.PATCH, regionId, service, url, query, params)
 }
 
 func (self *SHuaweiClient) put(service, regionId, resource string, params map[string]interface{}) (jsonutils.JSONObject, error) {
@@ -698,5 +783,37 @@ func (self *SHuaweiClient) put(service, regionId, resource string, params map[st
 	if err != nil {
 		return nil, err
 	}
-	return self.request(httputils.PUT, regionId, url, nil, params)
+	return self.request(httputils.PUT, regionId, service, url, nil, params)
+}
+
+type SMonthBill struct {
+	Currency      string
+	ConsumeAmount float64
+	BillSums      []struct {
+		CustomerId    string
+		ConsumeAmount float64
+	}
+}
+
+// https://console.huaweicloud.com/apiexplorer/#/openapi/BSS/doc?api=ShowCustomerMonthlySum
+func (self *SHuaweiClient) QueryAccountMonthBill(month int) (*SMonthBill, error) {
+	ret := SMonthBill{}
+	query := url.Values{}
+	query.Set("bill_cycle", fmt.Sprintf("%d-%d", month/10, month%10))
+	for _, service := range []string{SERVICE_BSS, SERVICE_BSS_INTL} {
+		resp, err := self.list(service, "", "bills/customer-bills/monthly-sum", query)
+		if err != nil {
+			// 国际区账号会报错: {"error_code":"CBC.0150","error_msg":"Access denied. The customer does not belong to the website you are now at."}
+			if e, ok := err.(*sHuaweiError); ok && (e.ErrorCode == "CBC.0150" || e.ErrorCode == "CBC.0156") {
+				continue
+			}
+			return nil, err
+		}
+		err = resp.Unmarshal(&ret)
+		if err != nil {
+			return nil, err
+		}
+		break
+	}
+	return &ret, nil
 }

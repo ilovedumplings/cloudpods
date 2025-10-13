@@ -76,10 +76,6 @@ func (self *SAzureRegionDriver) ValidateCreateWafInstanceData(ctx context.Contex
 	return input, nil
 }
 
-func (self *SAzureRegionDriver) ValidateCreateWafRuleData(ctx context.Context, userCred mcclient.TokenCredential, waf *models.SWafInstance, input api.WafRuleCreateInput) (api.WafRuleCreateInput, error) {
-	return input, nil
-}
-
 func (self *SAzureRegionDriver) ValidateCreateSecurityGroupInput(ctx context.Context, userCred mcclient.TokenCredential, input *api.SSecgroupCreateInput) (*api.SSecgroupCreateInput, error) {
 	for i := range input.Rules {
 		rule := input.Rules[i]
@@ -104,6 +100,6 @@ func (self *SAzureRegionDriver) ValidateUpdateSecurityGroupRuleInput(ctx context
 
 func (self *SAzureRegionDriver) GetSecurityGroupFilter(vpc *models.SVpc) (func(q *sqlchemy.SQuery) *sqlchemy.SQuery, error) {
 	return func(q *sqlchemy.SQuery) *sqlchemy.SQuery {
-		return q.Equals("cloudregion_id", vpc.CloudregionId)
+		return q.Equals("cloudregion_id", vpc.CloudregionId).Equals("manager_id", vpc.ManagerId)
 	}, nil
 }

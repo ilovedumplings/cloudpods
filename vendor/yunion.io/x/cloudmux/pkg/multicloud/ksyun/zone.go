@@ -29,15 +29,15 @@ type SZone struct {
 	multicloud.SResourceBase
 	region *SRegion
 	host   *SHost
-	SKsTag
+	SKsyunTags
 
 	AvailabilityZone string
 }
 
 func (region *SRegion) GetZones() ([]SZone, error) {
-	params := map[string]string{}
+	params := map[string]interface{}{}
 	if len(region.Region) > 0 {
-		params = map[string]string{"Region": region.Region}
+		params = map[string]interface{}{"Region": region.Region}
 	}
 	resp, err := region.ecsRequest("DescribeAvailabilityZones", params)
 	if err != nil {
@@ -147,27 +147,45 @@ func (zone *SZone) GetDescription() string {
 }
 
 func (zone *SZone) GetStorages() ([]SStorage, error) {
-	zoneDiskType := []string{}
-	for i := range ksDiskTypes {
-		params := map[string]string{
-			"VolumeType": ksDiskTypes[i],
+	zoneDiskType := map[string]bool{}
+	for _, storageType := range api.KSYUN_STORAGES {
+		if storageType == api.STORAGE_KSYUN_LOCAL_SSD {
+			zoneDiskType[storageType] = true
+			continue
 		}
-		resp, err := zone.region.ebsRequest("DescribeAvailabilityZones", params)
+		zoneList, err := zone.region.GetZonesByDiskType(storageType)
 		if err != nil {
-			return nil, errors.Wrapf(err, "%s:ValidateAttachInstance", ksDiskTypes[i])
+			return nil, errors.Wrapf(err, "GetZonesByDiskType: %s", storageType)
 		}
-		zoneList := []string{}
-		err = resp.Unmarshal(&zoneList, "AvailabilityZones")
-		if err != nil {
-			return nil, errors.Wrap(err, "unmarshal zoneList")
-		}
+
 		if utils.IsInStringArray(zone.GetName(), zoneList) {
-			zoneDiskType = append(zoneDiskType, ksDiskTypes[i])
+			zoneDiskType[storageType] = true
+		} else {
+			zoneDiskType[storageType] = false
 		}
 	}
 	storages := []SStorage{}
-	for i := range zoneDiskType {
-		storages = append(storages, SStorage{zone: zone, StorageType: zoneDiskType[i]})
+	for storageType, available := range zoneDiskType {
+		storage := SStorage{zone: zone, StorageType: storageType, available: available}
+		storages = append(storages, storage)
 	}
 	return storages, nil
+}
+
+func (region *SRegion) GetZonesByDiskType(diskType string) ([]string, error) {
+	params := map[string]interface{}{
+		"VolumeType": diskType,
+	}
+	resp, err := region.ebsRequest("DescribeAvailabilityZones", params)
+	if err != nil {
+		return nil, errors.Wrap(err, "DescribeAvailabilityZones")
+	}
+	ret := struct {
+		AvailabilityZones []string `json:"AvailabilityZones"`
+	}{}
+	err = resp.Unmarshal(&ret)
+	if err != nil {
+		return nil, errors.Wrap(err, "unmarshal zoneList")
+	}
+	return ret.AvailabilityZones, nil
 }

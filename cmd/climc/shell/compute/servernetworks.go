@@ -19,6 +19,7 @@ import (
 	"strconv"
 
 	"yunion.io/x/jsonutils"
+	"yunion.io/x/pkg/errors"
 	"yunion.io/x/pkg/util/printutils"
 	"yunion.io/x/pkg/util/regutils"
 
@@ -88,13 +89,14 @@ func init() {
 	})
 
 	type ServerNetworkUpdateOptions struct {
-		SERVER  string `help:"ID or Name of Server"`
-		NETWORK string `help:"ID or Name of Wire"`
-		Mac     string `help:"Mac of NIC"`
-		Driver  string `help:"Driver model of vNIC" choices:"virtio|e1000|vmxnet3|rtl8139"`
-		Index   int64  `help:"Index of NIC" default:"-1"`
-		Ifname  string `help:"Interface name of vNIC on host"`
-		Default bool   `help:"is default nic?"`
+		SERVER      string   `help:"ID or Name of Server"`
+		NETWORK     string   `help:"ID or Name of Wire"`
+		Mac         string   `help:"Mac of NIC"`
+		Driver      string   `help:"Driver model of vNIC" choices:"virtio|e1000|vmxnet3|rtl8139"`
+		Index       int64    `help:"Index of NIC" default:"-1"`
+		Ifname      string   `help:"Interface name of vNIC on host"`
+		Default     bool     `help:"is default nic?"`
+		PortMapping []string `help:"Network port mapping, e.g. 'port=80,host_port=8080,protocol=<tcp|udp>,host_port_range=<int>-<int>,remote_ips=x.x.x.x|y.y.y.y'" short-token:"p"`
 	}
 	R(&ServerNetworkUpdateOptions{}, "server-network-update", "Update server network settings", func(s *mcclient.ClientSession, args *ServerNetworkUpdateOptions) error {
 		params := jsonutils.NewDict()
@@ -109,6 +111,14 @@ func init() {
 		}
 		if args.Default {
 			params.Add(jsonutils.JSONTrue, "is_default")
+		}
+		if len(args.PortMapping) > 0 {
+			psm, err := cmdline.ParseNetworkConfigPortMappings(args.PortMapping)
+			if err != nil {
+				return errors.Wrap(err, "parse port mapping")
+			}
+			ps := psm[0]
+			params.Add(jsonutils.Marshal(ps), "port_mappings")
 		}
 		if params.Size() == 0 {
 			return InvalidUpdateError()
@@ -155,8 +165,9 @@ func init() {
 	})
 
 	type ServerAttachNetworkOptions struct {
-		SERVER  string   `help:"ID or Name of server"`
-		NETDESC []string `help:"Network description"`
+		SERVER            string   `help:"ID or Name of server"`
+		DisableSyncConfig bool     `help:"Disable sync config"`
+		NETDESC           []string `help:"Network description"`
 	}
 	R(&ServerAttachNetworkOptions{}, "server-attach-network", "Attach a server to a virtual network", func(s *mcclient.ClientSession, args *ServerAttachNetworkOptions) error {
 		input := compute.AttachNetworkInput{}
@@ -167,6 +178,7 @@ func init() {
 			}
 			input.Nets = append(input.Nets, conf)
 		}
+		input.DisableSyncConfig = &args.DisableSyncConfig
 		params := jsonutils.Marshal(input)
 		srv, err := modules.Servers.PerformAction(s, args.SERVER, "attachnetwork", params)
 		if err != nil {
@@ -180,12 +192,16 @@ func init() {
 		SERVER  string `help:"ID or Name of server"`
 		MACORIP string `help:"Mac Or IP of NIC"`
 		Reserve bool   `help:"Put the release IP address into reserved address pool"`
+		Force   bool   `help:"detach server network by force"`
 	}
 	R(&ServerDetachNetworkOptions{}, "server-detach-network", "Detach the virtual network fron a virtual server", func(s *mcclient.ClientSession, args *ServerDetachNetworkOptions) error {
 		params := jsonutils.NewDict()
 		// params.Add(jsonutils.NewString(args.NETWORK), "net_id")
 		if args.Reserve {
 			params.Add(jsonutils.JSONTrue, "reserve")
+		}
+		if args.Force {
+			params.Add(jsonutils.JSONTrue, "force")
 		}
 		if regutils.MatchMacAddr(args.MACORIP) {
 			params.Add(jsonutils.NewString(args.MACORIP), "mac")

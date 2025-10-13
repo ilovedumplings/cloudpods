@@ -39,7 +39,7 @@ type ConfigCreateInput struct {
 
 	// description: attribution
 	// required: true
-	// enum: system,domain
+	// enum: ["system","domain"]
 	// example: system
 	Attribution string `json:"attribution"`
 }
@@ -89,7 +89,7 @@ type ConfigManagerGetTypesInput struct {
 	DomainIds []string `json:"domain_ids"`
 	// description: Operation of reduce
 	// required: false
-	// enum: union,merge
+	// enum: ["union","merge"]
 	Operation string `json:"operation"`
 }
 
@@ -214,9 +214,10 @@ type SNotifyConfigContent struct {
 	Username      string
 	SenderAddress string
 	//Lark
-	AppId       string
-	AppSecret   string
-	AccessToken string
+	AppId                 string
+	AppSecret             string
+	AccessToken           string
+	AccessTokenExpireTime time.Time
 	// workwx
 	AgentId string
 	CorpId  string
@@ -226,6 +227,10 @@ type SNotifyConfigContent struct {
 	//AppSecret string
 	AppKey string
 	// sms
+	VerifiyCode     string
+	AlertsCode      string
+	ErrorCode       string
+	PhoneNumber     string
 	AccessKeyId     string
 	AccessKeySecret string
 	ServiceUrl      string

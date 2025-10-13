@@ -39,6 +39,7 @@ func StartService() {
 	baseOpts := &opts.BaseOptions
 	commonOpts := &opts.CommonOptions
 	common_options.ParseOptions(opts, os.Args, "apigateway.conf", api.SERVICE_TYPE)
+	InitDefaultPolicy()
 	app_common.InitAuth(commonOpts, func() {
 		log.Infof("Auth complete.")
 	})
@@ -57,7 +58,7 @@ func StartService() {
 	// log.Infof("Modules: %s", jsonutils.Marshal(jmods).PrettyString())
 
 	if !options.Options.DisableReporting {
-		cron := cronman.InitCronJobManager(true, 1)
+		cron := cronman.InitCronJobManager(true, 1, opts.TimeZone)
 		rand.Seed(time.Now().Unix())
 		cron.AddJobEveryFewDays("AutoReport", 1, rand.Intn(23), rand.Intn(59), 0, report.Report, true)
 		go cron.Start()

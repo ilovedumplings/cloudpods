@@ -22,6 +22,7 @@ import (
 
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/proxy"
+	"yunion.io/x/onecloud/pkg/compute/models/baremetal"
 )
 
 func InitDB() error {
@@ -49,6 +50,7 @@ func InitDB() error {
 		NetworkAddressManager,
 		NetworkIpMacManager,
 		GuestManager,
+		GuestnetworkManager,
 		HostManager,
 		LoadbalancerCertificateManager,
 		LoadbalancerAclManager,
@@ -78,6 +80,8 @@ func InitDB() error {
 		GroupnetworkManager,
 
 		ElasticcacheManager,
+
+		baremetal.BaremetalProfileManager,
 	} {
 		now := time.Now()
 		err := manager.InitializeData()

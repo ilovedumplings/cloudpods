@@ -42,7 +42,7 @@ type NetworkListOptions struct {
 	IsAutoAlloc *bool `help:"search network with is_auto_alloc"`
 	IsClassic   *bool `help:"search classic on-premise network"`
 
-	Status string `help:"filter by network status"`
+	// Status string `help:"filter by network status"`
 
 	GuestIpStart []string `help:"search by guest_ip_start"`
 	GuestIpEnd   []string `help:"search by guest_ip_end"`
@@ -67,9 +67,9 @@ func (opts *NetworkListOptions) Params() (jsonutils.JSONObject, error) {
 type NetworkCreateOptions struct {
 	WIRE    string `help:"ID or Name of wire in which the network is created"`
 	NETWORK string `help:"Name of new network"`
-	STARTIP string `help:"Start of IPv4 address range"`
-	ENDIP   string `help:"End of IPv4 address rnage"`
-	NETMASK int64  `help:"Length of network mask"`
+	StartIp string `help:"Start of IPv4 address range"`
+	EndIp   string `help:"End of IPv4 address rnage"`
+	NetMask int64  `help:"Length of network mask"`
 	Gateway string `help:"Default gateway"`
 
 	StartIp6 string `help:"IPv6 start ip"`
@@ -80,7 +80,7 @@ type NetworkCreateOptions struct {
 	VlanId      int64  `help:"Vlan ID" default:"1"`
 	IfnameHint  string `help:"Hint for ifname generation"`
 	AllocPolicy string `help:"Address allocation policy" choices:"none|stepdown|stepup|random"`
-	ServerType  string `help:"Server type" choices:"baremetal|container|eip|guest|ipmi|pxe"`
+	ServerType  string `help:"Server type" choices:"baremetal|container|eip|guest|ipmi|pxe|hostlocal"`
 	IsAutoAlloc *bool  `help:"Auto allocation IP pool"`
 	BgpType     string `help:"Internet service provider name" positional:"false"`
 	Desc        string `help:"Description" metavar:"DESCRIPTION"`
@@ -91,9 +91,16 @@ func (opts *NetworkCreateOptions) Params() (jsonutils.JSONObject, error) {
 
 	params.Add(jsonutils.NewString(opts.WIRE), "wire")
 	params.Add(jsonutils.NewString(opts.NETWORK), "name")
-	params.Add(jsonutils.NewString(opts.STARTIP), "guest_ip_start")
-	params.Add(jsonutils.NewString(opts.ENDIP), "guest_ip_end")
-	params.Add(jsonutils.NewInt(opts.NETMASK), "guest_ip_mask")
+
+	if len(opts.StartIp) > 0 {
+		params.Add(jsonutils.NewString(opts.StartIp), "guest_ip_start")
+	}
+	if len(opts.EndIp) > 0 {
+		params.Add(jsonutils.NewString(opts.EndIp), "guest_ip_end")
+	}
+	if opts.NetMask > 0 {
+		params.Add(jsonutils.NewInt(opts.NetMask), "guest_ip_mask")
+	}
 	if len(opts.Gateway) > 0 {
 		params.Add(jsonutils.NewString(opts.Gateway), "guest_gateway")
 	}
@@ -157,6 +164,8 @@ type NetworkUpdateOptions struct {
 	ExternalId  string `help:"External ID"`
 	AllocPolicy string `help:"Address allocation policy" choices:"none|stepdown|stepup|random"`
 	IsAutoAlloc *bool  `help:"Add network into auto-allocation pool" negative:"no_auto_alloc"`
+
+	ServerType string `help:"specify network server_type" choices:"baremetal|container|guest|pxe|ipmi|eip|hostlocal"`
 }
 
 func (opts *NetworkUpdateOptions) Params() (jsonutils.JSONObject, error) {
@@ -233,6 +242,9 @@ func (opts *NetworkUpdateOptions) Params() (jsonutils.JSONObject, error) {
 	}
 	if opts.IsAutoAlloc != nil {
 		params.Add(jsonutils.NewBool(*opts.IsAutoAlloc), "is_auto_alloc")
+	}
+	if len(opts.ServerType) > 0 {
+		params.Add(jsonutils.NewString(opts.ServerType), "server_type")
 	}
 	if params.Size() == 0 {
 		return nil, shell.InvalidUpdateError()

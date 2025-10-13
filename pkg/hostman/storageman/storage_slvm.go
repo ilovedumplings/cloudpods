@@ -15,11 +15,15 @@
 package storageman
 
 import (
+	"context"
+	"path"
+
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 
 	api "yunion.io/x/onecloud/pkg/apis/compute"
+	"yunion.io/x/onecloud/pkg/hostman/hostutils"
 	"yunion.io/x/onecloud/pkg/hostman/storageman/lvmutils"
 )
 
@@ -88,15 +92,67 @@ func (s *SSLVMStorage) GetDiskById(diskId string) (IDisk, error) {
 	}
 
 	var disk = NewSLVMDisk(s, diskId)
-	if disk.Probe() == nil {
+	err := disk.Probe()
+	if err == nil {
 		s.Disks = append(s.Disks, disk)
 		return disk, nil
+	} else {
+		log.Errorf("failed probe slvm disk %s: %s", diskId, err)
 	}
 	return nil, errors.ErrNotFound
 }
 
+func (s *SSLVMStorage) CreateDiskFromSnapshot(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) (jsonutils.JSONObject, error) {
+	snapshotLocation := disk.GetSnapshotPath(input.DiskInfo.SnapshotId)
+
+	return disk.CreateFromSnapshotLocation(ctx, snapshotLocation, int64(input.DiskInfo.DiskSizeMb), &input.DiskInfo.EncryptInfo)
+}
+
+func (s *SSLVMStorage) DeleteSnapshot(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
+	input, ok := params.(*SStorageDeleteSnapshot)
+	if !ok {
+		return nil, hostutils.ParamsError
+	}
+
+	if input.BlockStream {
+		diskLvPath := path.Join("/dev", s.GetPath(), input.DiskId)
+		err := lvmutils.LVActive(diskLvPath, false, s.Lvmlockd())
+		if err != nil {
+			return nil, errors.Wrap(err, "lvactive exclusive")
+		}
+
+		err = ConvertLVMDisk(s.GetPath(), input.DiskId, input.EncryptInfo)
+		if err != nil {
+			return nil, err
+		}
+
+	} else if len(input.ConvertSnapshot) > 0 {
+		convertSnapshotName := "snap_" + input.ConvertSnapshot
+		convertSnapshotPath := path.Join("/dev", s.GetPath(), convertSnapshotName)
+		err := lvmutils.LVActive(convertSnapshotPath, false, s.Lvmlockd())
+		if err != nil {
+			return nil, errors.Wrap(err, "lvactive exclusive")
+		}
+
+		if err := ConvertLVMDisk(s.GetPath(), convertSnapshotName, input.EncryptInfo); err != nil {
+			return nil, err
+		}
+	}
+
+	snapName := "snap_" + input.SnapshotId
+	snapId := path.Join("/dev", s.GetPath(), snapName)
+	err := lvmutils.LvRemove(snapId)
+	if err != nil {
+		return nil, err
+	}
+
+	res := jsonutils.NewDict()
+	res.Set("deleted", jsonutils.JSONTrue)
+	return res, nil
+}
+
 func (s *SSLVMStorage) Accessible() error {
-	if err := lvmutils.VgActive(s.Path, true); err != nil {
+	if err := lvmutils.VgActive(s.Path, true, true); err != nil {
 		log.Warningf("vgactive got %s", err)
 	}
 
@@ -119,6 +175,18 @@ func (s *SSLVMStorage) SetStorageInfo(storageId, storageName string, conf jsonut
 
 	if err := s.Accessible(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (s *SSLVMStorage) CreateDiskFromBackup(ctx context.Context, disk IDisk, input *SDiskCreateByDiskinfo) error {
+	err := s.SLVMStorage.CreateDiskFromBackup(ctx, disk, input)
+	if err != nil {
+		return err
+	}
+	err = lvmutils.LVDeactivate(disk.GetPath())
+	if err != nil {
+		return errors.Wrap(err, "LVDeactivate")
 	}
 	return nil
 }

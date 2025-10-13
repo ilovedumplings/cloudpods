@@ -18,8 +18,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
+	"math/big"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	"yunion.io/x/pkg/util/rand"
 	"yunion.io/x/pkg/util/rbacscope"
 	"yunion.io/x/pkg/util/regutils"
+	"yunion.io/x/pkg/util/sets"
 	"yunion.io/x/pkg/utils"
 	"yunion.io/x/sqlchemy"
 
@@ -93,11 +95,11 @@ type SNetwork struct {
 	IfnameHint string `width:"9" charset:"ascii" nullable:"true" list:"user" create:"optional"`
 
 	// 起始IP地址
-	GuestIpStart string `width:"16" charset:"ascii" nullable:"false" list:"user" update:"user" create:"required"`
+	GuestIpStart string `width:"16" charset:"ascii" nullable:"true" list:"user" update:"user" create:"optional"`
 	// 结束IP地址
-	GuestIpEnd string `width:"16" charset:"ascii" nullable:"false" list:"user" update:"user" create:"required"`
+	GuestIpEnd string `width:"16" charset:"ascii" nullable:"true" list:"user" update:"user" create:"optional"`
 	// 掩码
-	GuestIpMask int8 `nullable:"false" list:"user" update:"user" create:"required"`
+	GuestIpMask int8 `nullable:"true" list:"user" update:"user" create:"optional"`
 	// 网关地址
 	GuestGateway string `width:"16" charset:"ascii" nullable:"true" list:"user" update:"user" create:"optional"`
 	// DNS, allow multiple dns, seperated by ","
@@ -119,15 +121,15 @@ type SNetwork struct {
 	// IPv6网关
 	GuestGateway6 string `width:"64" charset:"ascii" nullable:"true" list:"user" update:"user" create:"optional"`
 	// IPv6域名服务器
-	GuestDns6 string `width:"64" charset:"ascii" nullable:"true"`
+	// GuestDns6 string `width:"64" charset:"ascii" nullable:"true"`
 
-	GuestDomain6 string `width:"128" charset:"ascii" nullable:"true"`
+	// GuestDomain6 string `width:"128" charset:"ascii" nullable:"true"`
 
 	VlanId int `nullable:"false" default:"1" list:"user" update:"user" create:"optional"`
 
 	// 服务器类型
 	// example: server
-	ServerType string `width:"16" charset:"ascii" default:"guest" nullable:"true" list:"user" create:"optional"`
+	ServerType api.TNetworkType `width:"16" charset:"ascii" default:"guest" nullable:"true" list:"user" update:"admin" create:"optional"`
 
 	// 分配策略
 	AllocPolicy string `width:"16" charset:"ascii" nullable:"true" get:"user" update:"user" create:"optional"`
@@ -372,7 +374,7 @@ func (snet *SNetwork) getFreeIP(addrTable map[string]bool, recentUsedAddrTable m
 			return "", err
 		}
 		if !iprange.Contains(candIP) {
-			return "", httperrors.NewInputParameterError("candidate %s out of range", candidate)
+			return "", httperrors.NewInputParameterError("candidate %s out of range %s", candidate, iprange.String())
 		}
 		if _, ok := addrTable[candidate]; !ok {
 			return candidate, nil
@@ -515,8 +517,10 @@ func (snet *SNetwork) GetNTP() string {
 func (snet *SNetwork) GetDomain() string {
 	if len(snet.GuestDomain) > 0 {
 		return snet.GuestDomain
-	} else {
+	} else if !apis.IsIllegalSearchDomain(options.Options.DNSDomain) {
 		return options.Options.DNSDomain
+	} else {
+		return ""
 	}
 }
 
@@ -577,19 +581,6 @@ func (snet *SNetwork) _updateDnsRecord(name string, ipAddr string, isAdd bool) {
 	}
 }
 
-func (snet *SNetwork) updateGuestNetmap(nic *SGuestnetwork) {
-	// TODO
-
-}
-
-func (snet *SNetwork) UpdateBaremetalNetmap(nic *SHostnetwork, name string) {
-	snet.UpdateNetmap(nic.IpAddr, auth.AdminCredential().GetTenantId(), name)
-}
-
-func (snet *SNetwork) UpdateNetmap(ip, project, name string) {
-	// TODO ??
-}
-
 type DNSUpdateKeySecret struct {
 	Key    string
 	Secret string
@@ -615,6 +606,9 @@ func (snet *SNetwork) GetGuestIpv4StartAddress() netutils.IPV4Addr {
 }
 
 func (snet *SNetwork) IsExitNetwork() bool {
+	if len(snet.GuestIpStart) == 0 {
+		return false
+	}
 	return len(snet.ExternalId) == 0 && netutils.IsExitAddress(snet.GetGuestIpv4StartAddress())
 }
 
@@ -734,7 +728,7 @@ func (snet *SNetwork) SyncWithCloudNetwork(ctx context.Context, userCred mcclien
 		snet.GuestIpEnd = extNet.GetIpEnd()
 		snet.GuestIpMask = extNet.GetIpMask()
 		snet.GuestGateway = extNet.GetGateway()
-		snet.ServerType = extNet.GetServerType()
+		snet.ServerType = api.TNetworkType(extNet.GetServerType())
 
 		snet.GuestIp6Start = extNet.GetIp6Start()
 		snet.GuestIp6End = extNet.GetIp6End()
@@ -799,7 +793,7 @@ func (manager *SNetworkManager) newFromCloudNetwork(ctx context.Context, userCre
 	net.GuestIpEnd = extNet.GetIpEnd()
 	net.GuestIpMask = extNet.GetIpMask()
 	net.GuestGateway = extNet.GetGateway()
-	net.ServerType = extNet.GetServerType()
+	net.ServerType = api.TNetworkType(extNet.GetServerType())
 	net.GuestIp6Start = extNet.GetIp6Start()
 	net.GuestIp6End = extNet.GetIp6End()
 	net.GuestIp6Mask = extNet.GetIp6Mask()
@@ -858,7 +852,11 @@ func (manager *SNetworkManager) newFromCloudNetwork(ctx context.Context, userCre
 }
 
 func (net *SNetwork) IsAddressInRange(address netutils.IPV4Addr) bool {
-	return net.getIPRange().Contains(address)
+	ipRange := net.getIPRange()
+	if ipRange == nil {
+		return false
+	}
+	return ipRange.Contains(address)
 }
 
 func (net *SNetwork) IsAddress6InRange(address netutils.IPV6Addr) bool {
@@ -923,16 +921,55 @@ func (manager *SNetworkManager) fetchAllOnpremiseNetworks(serverType string, isP
 }
 
 func (manager *SNetworkManager) GetOnPremiseNetworkOfIP(ipAddr string, serverType string, isPublic tristate.TriState) (*SNetwork, error) {
-	address, err := netutils.NewIPV4Addr(ipAddr)
+	var addr4 netutils.IPV4Addr
+	var addr6 netutils.IPV6Addr
+	var isIpv6Addr = false
+	var err error
+	if strings.Contains(ipAddr, ":") {
+		isIpv6Addr = true
+	}
+
+	if isIpv6Addr {
+		addr6, err = netutils.NewIPV6Addr(ipAddr)
+		if err != nil {
+			return nil, errors.Wrap(err, "NewIPV6Addr")
+		}
+	} else {
+		addr4, err = netutils.NewIPV4Addr(ipAddr)
+		if err != nil {
+			return nil, errors.Wrap(err, "NewIPV4Addr")
+		}
+	}
+
+	nets, err := manager.fetchAllOnpremiseNetworks(serverType, isPublic)
 	if err != nil {
-		return nil, errors.Wrap(err, "NewIPV4Addr")
+		return nil, errors.Wrap(err, "fetchAllOnpremiseNetworks")
+	}
+	for _, n := range nets {
+		if isIpv6Addr {
+			if n.IsAddress6InRange(addr6) {
+				return &n, nil
+			}
+		} else {
+			if n.IsAddressInRange(addr4) {
+				return &n, nil
+			}
+		}
+	}
+	return nil, sql.ErrNoRows
+}
+
+func (manager *SNetworkManager) GetOnPremiseNetworkOfIP6(ip6Addr string, serverType string, isPublic tristate.TriState) (*SNetwork, error) {
+	address, err := netutils.NewIPV6Addr(ip6Addr)
+	if err != nil {
+		return nil, errors.Wrap(err, "NewIPV6Addr")
 	}
 	nets, err := manager.fetchAllOnpremiseNetworks(serverType, isPublic)
 	if err != nil {
 		return nil, errors.Wrap(err, "fetchAllOnpremiseNetworks")
 	}
 	for _, n := range nets {
-		if n.IsAddressInRange(address) {
+		if n.IsAddress6InRange(address) {
 			return &n, nil
 		}
 	}
@@ -988,7 +1025,7 @@ func (manager *SNetworkManager) TotalPortCount(
 	providers []string, brands []string, cloudEnv string,
 	rangeObjs []db.IStandaloneModel,
 	policyResult rbacutils.SPolicyResult,
-) map[string]NetworkPortStat {
+) map[api.TNetworkType]NetworkPortStat {
 	nets := make([]SNetwork, 0)
 	err := manager.totalPortCountQ(
 		ctx,
@@ -1001,7 +1038,7 @@ func (manager *SNetworkManager) TotalPortCount(
 	if err != nil {
 		log.Errorf("TotalPortCount: %v", err)
 	}
-	ret := make(map[string]NetworkPortStat)
+	ret := make(map[api.TNetworkType]NetworkPortStat)
 	for _, net := range nets {
 		var stat NetworkPortStat
 		var allStat NetworkPortStat
@@ -1009,7 +1046,7 @@ func (manager *SNetworkManager) TotalPortCount(
 			stat, _ = ret[net.ServerType]
 		}
 		allStat, _ = ret[""]
-		count := net.getIPRange().AddressCount()
+		count := net.GetTotalAddressCount()
 		if net.IsExitNetwork() {
 			if len(net.ServerType) > 0 {
 				stat.CountExt += count
@@ -1067,7 +1104,19 @@ func (snet *SNetwork) GetFreeAddressCount() (int, error) {
 }
 
 func (snet *SNetwork) GetTotalAddressCount() int {
-	return snet.getIPRange().AddressCount()
+	ipRange := snet.getIPRange()
+	if ipRange != nil {
+		return ipRange.AddressCount()
+	}
+	ip6Range := snet.getIPRange6()
+	if ip6Range == nil {
+		return 0
+	}
+	cnt := ip6Range.AddressCount()
+	if cnt.Cmp(big.NewInt(math.MaxInt32)) > 0 {
+		return math.MaxInt32
+	}
+	return int(cnt.Int64())
 }
 
 func (snet *SNetwork) getFreeAddressCount() (int, error) {
@@ -1079,22 +1128,10 @@ func (snet *SNetwork) getFreeAddressCount() (int, error) {
 	if nics, ok := vnics[snet.Id]; ok {
 		used = nics.Total
 	}
-	return snet.getIPRange().AddressCount() - used, nil
+	return snet.GetTotalAddressCount() - used, nil
 }
 
-func (snet *SNetwork) getFreeAddress6Count() (int, error) {
-	vnics, err := NetworkManager.TotalNicCount([]string{snet.Id})
-	if err != nil {
-		return -1, errors.Wrapf(err, "TotalNicCount")
-	}
-	used := 0
-	if nics, ok := vnics[snet.Id]; ok {
-		used = nics.Total
-	}
-	return snet.getIPRange().AddressCount() - used, nil
-}
-
-func isValidNetworkInfo(ctx context.Context, userCred mcclient.TokenCredential, netConfig *api.NetworkConfig, reuseAddr string) error {
+func isValidNetworkInfo(ctx context.Context, userCred mcclient.TokenCredential, netConfig *api.NetworkConfig, reuseAddr, reuseAddr6 string) error {
 	if len(netConfig.Network) > 0 {
 		netObj, err := NetworkManager.FetchByIdOrName(ctx, userCred, netConfig.Network)
 		if err != nil {
@@ -1157,7 +1194,7 @@ func isValidNetworkInfo(ctx context.Context, userCred mcclient.TokenCredential, 
 				if err != nil {
 					return httperrors.NewInternalServerError("isAddress6Used fail %s", err)
 				}
-				if used {
+				if used && netConfig.Address6 != reuseAddr6 {
 					return httperrors.NewInputParameterError("v6 address %s has been used", netConfig.Address6)
 				}
 			}
@@ -1189,6 +1226,78 @@ func isValidNetworkInfo(ctx context.Context, userCred mcclient.TokenCredential, 
 		ct, ctExit := NetworkManager.to
 	}
 	*/
+	if len(netConfig.PortMappings) != 0 {
+		for i := range netConfig.PortMappings {
+			if err := validatePortMapping(netConfig.PortMappings[i]); err != nil {
+				return errors.Wrapf(err, "validate port mapping %s", jsonutils.Marshal(netConfig.PortMappings[i]))
+			}
+		}
+	}
+	return nil
+}
+
+func validatePortRange(portRange *api.GuestPortMappingPortRange) error {
+	if portRange != nil {
+		if portRange.Start > portRange.End {
+			return httperrors.NewInputParameterError("port range start %d is large than %d", portRange.Start, portRange.End)
+		}
+		if portRange.Start <= api.GUEST_PORT_MAPPING_RANGE_START {
+			return httperrors.NewInputParameterError("port range start %d <= %d", api.GUEST_PORT_MAPPING_RANGE_START, portRange.Start)
+		}
+		if portRange.End > api.GUEST_PORT_MAPPING_RANGE_END {
+			return httperrors.NewInputParameterError("port range end %d > %d", api.GUEST_PORT_MAPPING_RANGE_END, portRange.End)
+		}
+	}
+	return nil
+}
+
+func validatePort(port int, start int, end int) error {
+	if port < start || port > end {
+		return httperrors.NewInputParameterError("port number %d isn't within %d to %d", port, start, end)
+	}
+	return nil
+}
+
+func validatePortMapping(pm *api.GuestPortMapping) error {
+	if err := validatePortRange(pm.HostPortRange); err != nil {
+		return err
+	}
+	if pm.HostPort != nil {
+		if err := validatePort(*pm.HostPort, api.GUEST_PORT_MAPPING_RANGE_START, api.GUEST_PORT_MAPPING_RANGE_END); err != nil {
+			return errors.Wrap(err, "validate host_port")
+		}
+	}
+	// -1 端口表示自动分配
+	if pm.Port != -1 {
+		if err := validatePort(pm.Port, 1, 65535); err != nil {
+			return errors.Wrap(err, "validate port")
+		}
+	}
+	if pm.Protocol == "" {
+		pm.Protocol = api.GuestPortMappingProtocolTCP
+	}
+	if !sets.NewString(string(api.GuestPortMappingProtocolUDP), string(api.GuestPortMappingProtocolTCP)).Has(string(pm.Protocol)) {
+		return httperrors.NewInputParameterError("unsupported protocol %s", pm.Protocol)
+	}
+	if len(pm.RemoteIps) != 0 {
+		for _, ip := range pm.RemoteIps {
+			if !regutils.MatchIPAddr(ip) && !regutils.MatchCIDR(ip) {
+				return httperrors.NewInputParameterError("invalid ip or prefix %s", ip)
+			}
+		}
+	}
+	if pm.Rule != nil {
+		if pm.Rule.FirstPortOffset != nil {
+			if *pm.Rule.FirstPortOffset < 0 {
+				return httperrors.NewInputParameterError("first port offset %d is less than 0", *pm.Rule.FirstPortOffset)
+			}
+		}
+	}
+	for _, env := range pm.Envs {
+		if env.ValueFrom != api.GuestPortMappingEnvValueFromPort && env.ValueFrom != api.GuestPortMappingEnvValueFromHostPort {
+			return httperrors.NewInputParameterError("invalid value from %s", env.ValueFrom)
+		}
+	}
 	return nil
 }
 
@@ -1203,10 +1312,6 @@ func IsExitNetworkInfo(ctx context.Context, userCred mcclient.TokenCredential, n
 		return true
 	}
 	return false
-}
-
-func (snet *SNetwork) GetPorts() int {
-	return snet.getIPRange().AddressCount()
 }
 
 func (manager *SNetworkManager) FetchCustomizeColumns(
@@ -1233,7 +1338,10 @@ func (manager *SNetworkManager) FetchCustomizeColumns(
 		if network.IsExitNetwork() {
 			rows[i].Exit = true
 		}
-		rows[i].Ports = network.GetPorts()
+		if network.IsClassic() {
+			rows[i].IsClassic = true
+		}
+		rows[i].Ports = network.GetTotalAddressCount()
 		rows[i].Routes = network.GetRoutes()
 		rows[i].Schedtags = GetSchedtagsDetailsToResourceV2(network, ctx)
 		rows[i].Dns = network.GetDNS(rows[i].Zone)
@@ -1702,7 +1810,7 @@ func (manager *SNetworkManager) validateEnsureZoneVpc(ctx context.Context, userC
 func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, query jsonutils.JSONObject, input api.NetworkCreateInput) (api.NetworkCreateInput, error) {
 	if input.ServerType == "" {
 		input.ServerType = api.NETWORK_TYPE_GUEST
-	} else if !utils.IsInStringArray(input.ServerType, api.ALL_NETWORK_TYPES) {
+	} else if !api.IsInNetworkTypes(input.ServerType, api.ALL_NETWORK_TYPES) {
 		return input, httperrors.NewInputParameterError("Invalid server_type: %s", input.ServerType)
 	}
 
@@ -1728,6 +1836,7 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 	} else {
 		return input, httperrors.NewInputParameterError("zone and vpc info required when wire is absent")
 	}
+
 	input.WireId = wire.Id
 	if vpc.Status != api.VPC_STATUS_AVAILABLE {
 		return input, httperrors.NewInvalidStatusError("VPC not ready")
@@ -1761,7 +1870,7 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 
 	if vpc.Id != api.DEFAULT_VPC_ID {
 		// require prefix
-		if len(input.GuestIpPrefix) == 0 {
+		if len(input.GuestIpPrefix) == 0 && len(input.GuestIp6Start) > 0 && len(input.GuestIp6End) > 0 {
 			return input, errors.Wrap(httperrors.ErrInputParameter, "guest_ip_prefix is required")
 		}
 		if len(input.GuestIp6Prefix) == 0 && len(input.GuestIp6Start) > 0 && len(input.GuestIp6End) > 0 {
@@ -1795,7 +1904,7 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 	}
 
 	var (
-		ipRange netutils.IPV4AddrRange
+		ipRange *netutils.IPV4AddrRange
 		masklen int8
 		netAddr netutils.IPV4Addr
 	)
@@ -1804,7 +1913,8 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 		if err != nil {
 			return input, httperrors.NewInputParameterError("ip_prefix error: %s", err)
 		}
-		ipRange = prefix.ToIPRange()
+		ipRangeTmp := prefix.ToIPRange()
+		ipRange = &ipRangeTmp
 		masklen = prefix.MaskLen
 		netAddr = prefix.Address.NetAddr(masklen)
 		input.GuestIpMask = prefix.MaskLen
@@ -1849,7 +1959,8 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 		if err != nil {
 			return input, httperrors.NewInputParameterError("invalid end ip: %s %s", input.GuestIpEnd, err)
 		}
-		ipRange = netutils.NewIPV4AddrRange(ipStart, ipEnd)
+		ipRangeTpm := netutils.NewIPV4AddrRange(ipStart, ipEnd)
+		ipRange = &ipRangeTpm
 		masklen = input.GuestIpMask
 		netAddr = ipStart.NetAddr(masklen)
 		if ipEnd.NetAddr(masklen) != netAddr {
@@ -1916,6 +2027,10 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 		}
 	}
 
+	if ipRange == nil && ipRange6 == nil {
+		return input, httperrors.NewBadRequestError("No valid ipv4/ipv6 address input")
+	}
+
 	// do not set default dns
 	// if len(input.GuestDns) == 0 {
 	// 	input.GuestDns = options.Options.DNSServer
@@ -1969,9 +2084,10 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 	}
 
 	{
-		if !vpc.containsIPV4Range(ipRange) {
+		if ipRange != nil && !vpc.containsIPV4Range(*ipRange) {
 			return input, httperrors.NewInputParameterError("Network not in range of VPC cidrblock %s", vpc.CidrBlock)
 		}
+
 		if ipRange6 != nil {
 			if !vpc.containsIPV6Range(*ipRange6) {
 				return input, httperrors.NewInputParameterError("Network not in range of VPC ipv6 cidrblock %s", vpc.CidrBlock6)
@@ -1980,11 +2096,12 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 	}
 
 	{
-		nets, err := vpc.GetNetworks()
+		provider := wire.GetProviderName()
+		nets, err := vpc.GetNetworksByProvider(provider)
 		if err != nil {
 			return input, httperrors.NewInternalServerError("fail to GetNetworks of vpc: %v", err)
 		}
-		if isOverlapNetworks(nets, ipRange) {
+		if ipRange != nil && isOverlapNetworks(nets, *ipRange) {
 			return input, httperrors.NewInputParameterError("Conflict address space with existing networks in vpc %q", vpc.GetName())
 		}
 		if ipRange6 != nil && isOverlapNetworks6(nets, *ipRange6) {
@@ -1992,8 +2109,10 @@ func (manager *SNetworkManager) ValidateCreateData(ctx context.Context, userCred
 		}
 	}
 
-	input.GuestIpStart = ipRange.StartIp().String()
-	input.GuestIpEnd = ipRange.EndIp().String()
+	if ipRange != nil {
+		input.GuestIpStart = ipRange.StartIp().String()
+		input.GuestIpEnd = ipRange.EndIp().String()
+	}
 
 	if ipRange6 != nil {
 		// validate v6 ip addr
@@ -2202,9 +2321,13 @@ func (snet *SNetwork) validateUpdateData(ctx context.Context, userCred mcclient.
 	}
 
 	if input.IsAutoAlloc != nil && *input.IsAutoAlloc {
-		if snet.ServerType != api.NETWORK_TYPE_GUEST {
+		if snet.ServerType != api.NETWORK_TYPE_GUEST && snet.ServerType != api.NETWORK_TYPE_HOSTLOCAL {
 			return input, httperrors.NewInputParameterError("network server_type %s not support auto alloc", snet.ServerType)
 		}
+	}
+
+	if len(input.ServerType) > 0 && !api.IsInNetworkTypes(input.ServerType, api.ALL_NETWORK_TYPES) {
+		return input, errors.Wrapf(httperrors.ErrInputParameter, "invalid server_type %q", input.ServerType)
 	}
 
 	return input, nil
@@ -2216,23 +2339,7 @@ func (snet *SNetwork) ValidateUpdateData(
 	query jsonutils.JSONObject,
 	input api.NetworkUpdateInput,
 ) (api.NetworkUpdateInput, error) {
-	if !snet.isManaged() {
-		if !snet.isOneCloudVpcNetwork() {
-			// classic network
-		} else {
-			// vpc network, not allow to update ip_start, ip_end, ip_mask, gateway, dhcp
-			input.GuestIpStart = ""
-			input.GuestIpEnd = ""
-			input.GuestIpMask = 0
-			input.GuestGateway = nil
-			input.GuestDhcp = nil
-
-			input.GuestIp6Start = nil
-			input.GuestIp6End = nil
-			input.GuestIp6Mask = nil
-			input.GuestGateway6 = nil
-		}
-	} else {
+	if snet.isManaged() {
 		// managed network, not allow to update
 		input.GuestIpStart = ""
 		input.GuestIpEnd = ""
@@ -2340,10 +2447,10 @@ func (net *SNetwork) PostCreate(ctx context.Context, userCred mcclient.TokenCred
 	if vpc != nil && vpc.IsManaged() {
 		task, err := taskman.TaskManager.NewTask(ctx, "NetworkCreateTask", net, userCred, data.(*jsonutils.JSONDict), "", "", nil)
 		if err != nil {
-			log.Errorf("networkcreateTask create fail: %s", err)
-		} else {
-			task.ScheduleRun(nil)
+			net.SetStatus(ctx, userCred, apis.STATUS_CREATE_FAILED, err.Error())
+			return
 		}
+		task.ScheduleRun(nil)
 	} else {
 		{
 			err := net.syncAdditionalWires(ctx, nil)
@@ -2355,6 +2462,10 @@ func (net *SNetwork) PostCreate(ctx context.Context, userCred mcclient.TokenCred
 		if err := net.ClearSchedDescCache(); err != nil {
 			log.Errorf("network post create clear schedcache error: %v", err)
 		}
+		notifyclient.EventNotify(ctx, userCred, notifyclient.SEventNotifyParam{
+			Obj:    net,
+			Action: notifyclient.ActionCreate,
+		})
 	}
 	// reserve gateway IP
 	{
@@ -2477,7 +2588,7 @@ func (snet *SNetwork) isOneCloudVpcNetwork() bool {
 	return IsOneCloudVpcResource(snet)
 }
 
-func parseIpToIntArray(ip string) ([]int, error) {
+/*func parseIpToIntArray(ip string) ([]int, error) {
 	ipSp := strings.Split(strings.Trim(ip, "."), ".")
 	if len(ipSp) > 4 {
 		return nil, httperrors.NewInputParameterError("Parse Ip Failed")
@@ -2494,7 +2605,7 @@ func parseIpToIntArray(ip string) ([]int, error) {
 		ipIa = append(ipIa, val)
 	}
 	return ipIa, nil
-}
+}*/
 
 // IP子网列表
 func (manager *SNetworkManager) ListItemFilter(
@@ -2649,9 +2760,15 @@ func (manager *SNetworkManager) ListItemFilter(
 				ipStart := sqlchemy.INET_ATON(q.Field("guest_ip_start"))
 				ipEnd := sqlchemy.INET_ATON(q.Field("guest_ip_end"))
 
+				ipConst := sqlchemy.INET_ATON(q.StringField(ip4Addr.String()))
+
 				ipCondtion = sqlchemy.AND(
-					sqlchemy.GE(ipEnd, uint32(ip4Addr)),
-					sqlchemy.LE(ipStart, uint32(ip4Addr)),
+					sqlchemy.IsNotNull(q.Field("guest_ip_start")),
+					sqlchemy.IsNotNull(q.Field("guest_ip_end")),
+					sqlchemy.IsNotEmpty(q.Field("guest_ip_start")),
+					sqlchemy.IsNotEmpty(q.Field("guest_ip_end")),
+					sqlchemy.GE(ipEnd, ipConst),
+					sqlchemy.LE(ipStart, ipConst),
 				)
 				if !exactIpMatch {
 					ipCondtion = sqlchemy.OR(
@@ -2662,18 +2779,24 @@ func (manager *SNetworkManager) ListItemFilter(
 				}
 			} else if ip6Addr, err := netutils.NewIPV6Addr(ipstr); err == nil {
 				// ipv6 address, exactly
-				ipStart := q.Field("guest_ip6_start")
-				ipEnd := q.Field("guest_ip6_end")
+				ipStart := sqlchemy.INET6_ATON(q.Field("guest_ip6_start"))
+				ipEnd := sqlchemy.INET6_ATON(q.Field("guest_ip6_end"))
+
+				ipConst := sqlchemy.INET6_ATON(q.StringField(ip6Addr.String()))
 
 				ipCondtion = sqlchemy.AND(
-					sqlchemy.GE(ipEnd, ip6Addr.String()),
-					sqlchemy.LE(ipStart, ip6Addr.String()),
+					sqlchemy.IsNotNull(q.Field("guest_ip6_start")),
+					sqlchemy.IsNotNull(q.Field("guest_ip6_end")),
+					sqlchemy.IsNotEmpty(q.Field("guest_ip6_start")),
+					sqlchemy.IsNotEmpty(q.Field("guest_ip6_end")),
+					sqlchemy.GE(ipEnd, ipConst),
+					sqlchemy.LE(ipStart, ipConst),
 				)
 				if !exactIpMatch {
 					ipCondtion = sqlchemy.OR(
 						ipCondtion,
-						sqlchemy.Contains(q.Field("guest_ip6_start"), ipstr),
-						sqlchemy.Contains(q.Field("guest_ip6_end"), ipstr),
+						sqlchemy.Contains(q.Field("guest_ip6_start"), ip6Addr.String()),
+						sqlchemy.Contains(q.Field("guest_ip6_end"), ip6Addr.String()),
 					)
 				}
 			} else {
@@ -3189,13 +3312,37 @@ func (manager *SNetworkManager) PerformTryCreateNetwork(ctx context.Context, use
 	if len(input.Ip) == 0 {
 		return nil, httperrors.NewMissingParameterError("ip")
 	}
-	ipV4, err := netutils.NewIPV4Addr(input.Ip)
-	if err != nil {
-		return nil, httperrors.NewInputParameterError("ip")
-	}
+
+	var ipV4, ipV4NetAddr netutils.IPV4Addr
+	var ipV6, ipV6NetAddr netutils.IPV6Addr
+	var err error
+
 	if input.Mask == 0 {
 		return nil, httperrors.NewMissingParameterError("mask")
 	}
+
+	if regutils.MatchIP4Addr(input.Ip) {
+		ipV4, err = netutils.NewIPV4Addr(input.Ip)
+		if err != nil {
+			return nil, errors.Wrapf(err, "invalid ipv4 address %s", input.Ip)
+		}
+		if ipV4.IsZero() {
+			return nil, errors.Wrapf(errors.ErrInvalidFormat, "invalid ipv4 address %s", input.Ip)
+		}
+		ipV4NetAddr = ipV4.NetAddr(int8(input.Mask))
+	} else if regutils.MatchIP6Addr(input.Ip) {
+		ipV6, err = netutils.NewIPV6Addr(input.Ip)
+		if err != nil {
+			return nil, errors.Wrapf(err, "invalid ipv6 address %s", input.Ip)
+		}
+		if ipV6.IsZero() {
+			return nil, errors.Wrapf(errors.ErrInvalidFormat, "invalid ipv6 address %s", input.Ip)
+		}
+		ipV6NetAddr = ipV6.NetAddr(uint8(input.Mask))
+	} else {
+		return nil, errors.Wrapf(errors.ErrInvalidFormat, "invalid ip address %s", input.Ip)
+	}
+
 	if len(input.ServerType) == 0 {
 		return nil, httperrors.NewMissingParameterError("server_type")
 	}
@@ -3207,12 +3354,16 @@ func (manager *SNetworkManager) PerformTryCreateNetwork(ctx context.Context, use
 	}
 
 	var (
-		ipV4NetAddr = ipV4.NetAddr(int8(input.Mask))
-		nm          *SNetwork
-		matched     bool
+		nm      *SNetwork
+		matched bool
 	)
 
-	q := NetworkManager.Query().Equals("server_type", input.ServerType).Equals("guest_ip_mask", input.Mask)
+	q := NetworkManager.Query().Equals("server_type", input.ServerType)
+	if !ipV4.IsZero() {
+		q = q.Equals("guest_ip_mask", input.Mask)
+	} else if !ipV6.IsZero() {
+		q = q.Equals("guest_ip6_mask", input.Mask)
+	}
 
 	listQuery := api.NetworkListInput{}
 	err = query.Unmarshal(&listQuery)
@@ -3245,14 +3396,27 @@ func (manager *SNetworkManager) PerformTryCreateNetwork(ctx context.Context, use
 			return nil, err
 		}
 		n := item.(*SNetwork)
-		if n.GetIPRange().Contains(ipV4) {
-			nm = n
-			matched = true
-			break
-		} else if nIpV4, _ := netutils.NewIPV4Addr(n.GuestIpStart); nIpV4.NetAddr(n.GuestIpMask) == ipV4NetAddr {
-			nm = n
-			matched = false
-			break
+
+		if !ipV4.IsZero() {
+			if n.getIPRange().Contains(ipV4) {
+				nm = n
+				matched = true
+				break
+			} else if nIpV4, _ := netutils.NewIPV4Addr(n.GuestIpStart); nIpV4.NetAddr(n.GuestIpMask) == ipV4NetAddr {
+				nm = n
+				matched = false
+				break
+			}
+		} else if !ipV6.IsZero() {
+			if n.getIPRange6().Contains(ipV6) {
+				nm = n
+				matched = true
+				break
+			} else if nIpV6, _ := netutils.NewIPV6Addr(n.GuestIp6Start); nIpV6.NetAddr(n.GuestIp6Mask) == ipV6NetAddr {
+				nm = n
+				matched = false
+				break
+			}
 		}
 	}
 
@@ -3264,13 +3428,20 @@ func (manager *SNetworkManager) PerformTryCreateNetwork(ctx context.Context, use
 	ret.Set("find_matched", jsonutils.JSONTrue)
 	ret.Set("wire_id", jsonutils.NewString(nm.WireId))
 	if !matched {
-		log.Infof("Find same subnet network %s %s/%d", nm.Name, nm.GuestGateway, nm.GuestIpMask)
+		log.Infof("Find same subnet network %s %s/%d %s/%d", nm.Name, nm.GuestGateway, nm.GuestIpMask, nm.GuestGateway6, nm.GuestIp6Mask)
 		newNetwork := new(SNetwork)
 		newNetwork.SetModelManager(NetworkManager, newNetwork)
-		newNetwork.GuestIpStart = input.Ip
-		newNetwork.GuestIpEnd = input.Ip
-		newNetwork.GuestGateway = nm.GuestGateway
-		newNetwork.GuestIpMask = int8(input.Mask)
+		if !ipV4.IsZero() {
+			newNetwork.GuestIpStart = ipV4.String()
+			newNetwork.GuestIpEnd = ipV4.String()
+			newNetwork.GuestGateway = nm.GuestGateway
+			newNetwork.GuestIpMask = int8(input.Mask)
+		} else if !ipV6.IsZero() {
+			newNetwork.GuestIp6Start = ipV6.String()
+			newNetwork.GuestIp6End = ipV6.String()
+			newNetwork.GuestGateway6 = nm.GuestGateway6
+			newNetwork.GuestIp6Mask = uint8(input.Mask)
+		}
 		newNetwork.GuestDns = nm.GuestDns
 		newNetwork.GuestDhcp = nm.GuestDhcp
 		newNetwork.GuestNtp = nm.GuestNtp
@@ -3458,19 +3629,38 @@ func (network *SNetwork) GetDetailsAddresses(
 	return output, nil
 }
 
+func (network *SNetwork) GetUsedAddressDetails(ctx context.Context, addr string) (*api.SNetworkUsedAddress, error) {
+	address, err := network.GetAddressDetails(ctx, nil, nil, rbacscope.ScopeSystem)
+	if err != nil {
+		return nil, errors.Wrapf(err, "GetAddressDetails")
+	}
+	for i := range address {
+		if address[i].IpAddr == addr || address[i].Ip6Addr == addr {
+			return &address[i], nil
+		}
+	}
+	return nil, errors.Wrapf(errors.ErrNotFound, "%s", addr)
+}
+
+func (network *SNetwork) GetAddressDetails(ctx context.Context, userCred mcclient.TokenCredential, owner mcclient.IIdentityProvider, scope rbacscope.TRbacScope) ([]api.SNetworkUsedAddress, error) {
+	netAddrs := make([]api.SNetworkUsedAddress, 0)
+	q := network.getUsedAddressQuery(ctx, userCred, owner, scope, false)
+	err := q.All(&netAddrs)
+	if err != nil {
+		return nil, httperrors.NewGeneralError(err)
+	}
+	sort.Sort(SNetworkUsedAddressList(netAddrs))
+	return netAddrs, nil
+}
+
 func (network *SNetwork) fetchAddressDetails(ctx context.Context, userCred mcclient.TokenCredential, owner mcclient.IIdentityProvider, scope rbacscope.TRbacScope) (api.GetNetworkAddressesOutput, error) {
 	output := api.GetNetworkAddressesOutput{}
 	{
-		netAddrs := make([]api.SNetworkUsedAddress, 0)
-		q := network.getUsedAddressQuery(ctx, userCred, owner, scope, false)
-		err := q.All(&netAddrs)
+		var err error
+		output.Addresses, err = network.GetAddressDetails(ctx, userCred, owner, scope)
 		if err != nil {
-			return output, httperrors.NewGeneralError(err)
+			return output, err
 		}
-
-		sort.Sort(SNetworkUsedAddressList(netAddrs))
-
-		output.Addresses = netAddrs
 	}
 	{
 		netAddrs6 := make([]api.SNetworkUsedAddress, 0)
@@ -3805,6 +3995,10 @@ func (net *SNetwork) PerformSyncAdditionalWires(
 	return nil, nil
 }
 
+func (net *SNetwork) IsSupportIPv4() bool {
+	return len(net.GuestIpStart) > 0 && len(net.GuestIpEnd) > 0
+}
+
 func (net *SNetwork) IsSupportIPv6() bool {
 	return len(net.GuestIp6Start) > 0 && len(net.GuestIp6End) > 0
 }
@@ -3837,4 +4031,12 @@ func (net *SNetwork) StartRemoteUpdateTask(ctx context.Context, userCred mcclien
 	}
 	net.SetStatus(ctx, userCred, apis.STATUS_UPDATE_TAGS, "StartRemoteUpdateTask")
 	return task.ScheduleRun(nil)
+}
+
+func (net SNetwork) HasIPv4Addr() bool {
+	return len(net.GuestIpStart) > 0 && len(net.GuestIpEnd) > 0
+}
+
+func (net SNetwork) HasIPv6Addr() bool {
+	return len(net.GuestIp6Start) > 0 && len(net.GuestIp6End) > 0
 }

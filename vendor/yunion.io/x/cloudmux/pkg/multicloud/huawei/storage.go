@@ -47,6 +47,9 @@ func (self *SStorage) GetGlobalId() string {
 }
 
 func (self *SStorage) GetStatus() string {
+	if self.storageType == api.STORAGE_HUAWEI_SATA {
+		return api.STORAGE_OFFLINE
+	}
 	return api.STORAGE_ONLINE
 }
 
@@ -108,8 +111,8 @@ func (self *SStorage) GetEnabled() bool {
 	return true
 }
 
-func (self *SStorage) CreateIDisk(conf *cloudprovider.DiskCreateConfig) (cloudprovider.ICloudDisk, error) {
-	diskId, err := self.zone.region.CreateDisk(self.zone.GetId(), self.storageType, conf.Name, conf.SizeGb, "", conf.Desc, conf.ProjectId)
+func (self *SStorage) CreateIDisk(opts *cloudprovider.DiskCreateConfig) (cloudprovider.ICloudDisk, error) {
+	diskId, err := self.zone.region.CreateDisk(self.zone.GetId(), self.storageType, opts)
 	if err != nil {
 		return nil, errors.Wrapf(err, "CreateDisk")
 	}

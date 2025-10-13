@@ -33,7 +33,9 @@ import (
 	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	hostapi "yunion.io/x/onecloud/pkg/apis/host"
+	"yunion.io/x/onecloud/pkg/apis/image"
 	"yunion.io/x/onecloud/pkg/appsrv"
+	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/quotas"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/compute/models"
@@ -67,6 +69,13 @@ func (p *SPodDriver) GetProvider() string {
 }
 
 func (p *SPodDriver) ValidateCreateData(ctx context.Context, userCred mcclient.TokenCredential, input *api.ServerCreateInput) (*api.ServerCreateInput, error) {
+	for i, d := range input.Disks {
+		if d.Format != "" {
+			if d.Format != image.IMAGE_DISK_FORMAT_RAW {
+				return nil, httperrors.NewInputParameterError("not support format %s for disk %d", d.Format, i)
+			}
+		}
+	}
 	if input.Pod == nil {
 		return nil, httperrors.NewNotEmptyError("pod data is empty")
 	}
@@ -74,25 +83,36 @@ func (p *SPodDriver) ValidateCreateData(ctx context.Context, userCred mcclient.T
 		return nil, httperrors.NewNotEmptyError("containers data is empty")
 	}
 	// validate port mappings
-	if err := p.validatePortMappings(input.Pod); err != nil {
+	/*if err := p.validatePortMappings(input.Pod); err != nil {
 		return nil, errors.Wrap(err, "validate port mappings")
-	}
+	}*/
 
-	sameName := ""
+	ctrNames := sets.NewString()
+	volUniqNames := sets.NewString()
 	for idx, ctr := range input.Pod.Containers {
 		if err := p.validateContainerData(ctx, userCred, idx, input.Name, ctr, input); err != nil {
 			return nil, errors.Wrapf(err, "data of %d container", idx)
 		}
-		if ctr.Name == sameName {
+		if ctrNames.Has(ctr.Name) {
 			return nil, httperrors.NewDuplicateNameError("same name %s of containers", ctr.Name)
 		}
-		sameName = ctr.Name
+		ctrNames.Insert(ctr.Name)
+		for volIdx := range ctr.VolumeMounts {
+			vol := ctr.VolumeMounts[volIdx]
+			if vol.UniqueName != "" {
+				if volUniqNames.Has(vol.UniqueName) {
+					return nil, httperrors.NewDuplicateNameError("same volume unique name %s", fmt.Sprintf("container %s volume_mount %d %s", ctr.Name, volIdx, vol.UniqueName))
+				} else {
+					volUniqNames.Insert(vol.UniqueName)
+				}
+			}
+		}
 	}
 
 	return input, nil
 }
 
-func (p *SPodDriver) validatePortMappings(input *api.PodCreateInput) error {
+/*func (p *SPodDriver) validatePortMappings(input *api.PodCreateInput) error {
 	usedPorts := make(map[api.PodPortMappingProtocol]sets.Int)
 	for idx, pm := range input.PortMappings {
 		ports, ok := usedPorts[pm.Protocol]
@@ -111,7 +131,7 @@ func (p *SPodDriver) validatePortMappings(input *api.PodCreateInput) error {
 		}
 	}
 	return nil
-}
+}*/
 
 func (p *SPodDriver) validateHostPortMapping(hostId string, pm *api.PodPortMapping) error {
 	// TODO:
@@ -122,7 +142,7 @@ func (p *SPodDriver) validateContainerData(ctx context.Context, userCred mcclien
 	if ctr.Name == "" {
 		ctr.Name = fmt.Sprintf("%s-%d", defaultNamePrefix, idx)
 	}
-	if err := models.GetContainerManager().ValidateSpec(ctx, userCred, &ctr.ContainerSpec, nil); err != nil {
+	if err := models.GetContainerManager().ValidateSpec(ctx, userCred, &ctr.ContainerSpec, nil, nil); err != nil {
 		return errors.Wrap(err, "validate container spec")
 	}
 	if err := p.validateContainerVolumeMounts(ctx, userCred, ctr, input); err != nil {
@@ -162,19 +182,19 @@ func (p *SPodDriver) validatePortRange(portRange *api.PodPortMappingPortRange) e
 		if portRange.Start > portRange.End {
 			return httperrors.NewInputParameterError("port range start %d is large than %d", portRange.Start, portRange.End)
 		}
-		if portRange.Start <= 0 {
-			return httperrors.NewInputParameterError("port range start %d <= 0", portRange.Start)
+		if portRange.Start <= api.POD_PORT_MAPPING_RANGE_START {
+			return httperrors.NewInputParameterError("port range start %d <= %d", api.POD_PORT_MAPPING_RANGE_START, portRange.Start)
 		}
-		if portRange.End > 65535 {
-			return httperrors.NewInputParameterError("port range end %d > 65535", portRange.End)
+		if portRange.End > api.POD_PORT_MAPPING_RANGE_END {
+			return httperrors.NewInputParameterError("port range end %d > %d", api.POD_PORT_MAPPING_RANGE_END, portRange.End)
 		}
 	}
 	return nil
 }
 
-func (p *SPodDriver) validatePort(port int) error {
-	if port <= 0 || port > 65535 {
-		return httperrors.NewInputParameterError("port number %d isn't within 1 to 65535", port)
+func (p *SPodDriver) validatePort(port int, start int, end int) error {
+	if port < start || port > end {
+		return httperrors.NewInputParameterError("port number %d isn't within %d to %d", port, start, end)
 	}
 	return nil
 }
@@ -184,11 +204,11 @@ func (p *SPodDriver) validatePortMapping(pm *api.PodPortMapping) error {
 		return err
 	}
 	if pm.HostPort != nil {
-		if err := p.validatePort(*pm.HostPort); err != nil {
+		if err := p.validatePort(*pm.HostPort, api.POD_PORT_MAPPING_RANGE_START, api.POD_PORT_MAPPING_RANGE_END); err != nil {
 			return errors.Wrap(err, "validate host_port")
 		}
 	}
-	if err := p.validatePort(pm.ContainerPort); err != nil {
+	if err := p.validatePort(pm.ContainerPort, 1, 65535); err != nil {
 		return errors.Wrap(err, "validate container_port")
 	}
 	if pm.Protocol == "" {
@@ -239,8 +259,9 @@ func (p *SPodDriver) RequestGuestHotAddIso(ctx context.Context, guest *models.SG
 	return task.ScheduleRun(nil)
 }
 
-func (p *SPodDriver) PerformStart(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, data *jsonutils.JSONDict) error {
-	task, err := taskman.TaskManager.NewTask(ctx, "PodStartTask", guest, userCred, nil, "", "", nil)
+func (p *SPodDriver) PerformStart(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, data *jsonutils.JSONDict, parentTaskId string) error {
+	guest.SetStatus(ctx, userCred, api.VM_START_START, "")
+	task, err := taskman.TaskManager.NewTask(ctx, "PodStartTask", guest, userCred, nil, parentTaskId, "", nil)
 	if err != nil {
 		return errors.Wrap(err, "New PodStartTask")
 	}
@@ -251,7 +272,11 @@ func (p *SPodDriver) RequestStartOnHost(ctx context.Context, guest *models.SGues
 	header := p.getTaskRequestHeader(task)
 
 	config := jsonutils.NewDict()
-	desc, err := guest.GetDriver().GetJsonDescAtHost(ctx, task.GetUserCred(), guest, host, nil)
+	drv, err := guest.GetDriver()
+	if err != nil {
+		return err
+	}
+	desc, err := drv.GetJsonDescAtHost(ctx, task.GetUserCred(), guest, host, nil)
 	if err != nil {
 		return errors.Wrapf(err, "GetJsonDescAtHost")
 	}
@@ -294,7 +319,7 @@ func (p *SPodDriver) OnGuestDeployTaskDataReceived(ctx context.Context, guest *m
 }
 
 func (p *SPodDriver) StartGuestStopTask(guest *models.SGuest, ctx context.Context, userCred mcclient.TokenCredential, params *jsonutils.JSONDict, parentTaskId string) error {
-	task, err := taskman.TaskManager.NewTask(ctx, "PodStopTask", guest, userCred, nil, parentTaskId, "", nil)
+	task, err := taskman.TaskManager.NewTask(ctx, "PodStopTask", guest, userCred, params, parentTaskId, "", nil)
 	if err != nil {
 		return errors.Wrap(err, "New PodStopTask")
 	}
@@ -346,7 +371,7 @@ func (p *SPodDriver) GetJsonDescAtHost(ctx context.Context, userCred mcclient.To
 	}
 	ctrDescs := make([]*hostapi.ContainerDesc, len(ctrs))
 	for idx, ctr := range ctrs {
-		desc, err := ctr.GetJsonDescAtHost()
+		desc, err := ctr.GetJsonDescAtHost(ctx, userCred)
 		if err != nil {
 			return nil, errors.Wrapf(err, "GetJsonDescAtHost of container %s", ctr.GetId())
 		}
@@ -408,14 +433,15 @@ func (p *SPodDriver) performContainerAction(ctx context.Context, userCred mcclie
 }
 
 func (p *SPodDriver) getContainerCreateInput(ctx context.Context, userCred mcclient.TokenCredential, ctr *models.SContainer) (*hostapi.ContainerCreateInput, error) {
-	spec, err := ctr.ToHostContainerSpec()
+	spec, err := ctr.ToHostContainerSpec(ctx, userCred)
 	if err != nil {
 		return nil, errors.Wrap(err, "ToHostContainerSpec")
 	}
 	input := &hostapi.ContainerCreateInput{
-		Name:    ctr.GetName(),
-		GuestId: ctr.GuestId,
-		Spec:    spec,
+		Name:         ctr.GetName(),
+		GuestId:      ctr.GuestId,
+		Spec:         spec,
+		RestartCount: ctr.RestartCount,
 	}
 	return input, nil
 }
@@ -439,6 +465,10 @@ func (p *SPodDriver) RequestStartContainer(ctx context.Context, userCred mcclien
 }
 
 func (p *SPodDriver) RequestStopContainer(ctx context.Context, userCred mcclient.TokenCredential, task models.IContainerTask) error {
+	ctr := task.GetContainer()
+	params := task.GetParams()
+	params.Add(jsonutils.NewString(ctr.GetName()), "container_name")
+	params.Add(jsonutils.NewInt(int64(ctr.Spec.ShmSizeMB)), "shm_size_mb")
 	return p.performContainerAction(ctx, userCred, task, "stop", task.GetParams())
 }
 
@@ -452,6 +482,14 @@ func (p *SPodDriver) RequestSyncContainerStatus(ctx context.Context, userCred mc
 
 func (p *SPodDriver) RequestPullContainerImage(ctx context.Context, userCred mcclient.TokenCredential, task models.IContainerTask) error {
 	return p.performContainerAction(ctx, userCred, task, "pull-image", task.GetParams())
+}
+
+func (p *SPodDriver) RequestAddVolumeMountPostOverlay(ctx context.Context, userCred mcclient.TokenCredential, task models.IContainerTask) error {
+	return p.performContainerAction(ctx, userCred, task, "add-volume-mount-post-overlay", task.GetParams())
+}
+
+func (p *SPodDriver) RequestRemoveVolumeMountPostOverlay(ctx context.Context, userCred mcclient.TokenCredential, task models.IContainerTask) error {
+	return p.performContainerAction(ctx, userCred, task, "remove-volume-mount-post-overlay", task.GetParams())
 }
 
 type responder struct {
@@ -483,6 +521,23 @@ func (p *SPodDriver) RequestExecContainer(ctx context.Context, userCred mcclient
 	return nil
 }
 
+func (p *SPodDriver) requestContainerSyncAction(ctx context.Context, userCred mcclient.TokenCredential, container *models.SContainer, action string, input jsonutils.JSONObject) (jsonutils.JSONObject, error) {
+	pod := container.GetPod()
+	host, _ := pod.GetHost()
+	url := fmt.Sprintf("%s/pods/%s/containers/%s/%s", host.ManagerUri, pod.GetId(), container.GetId(), action)
+	header := mcclient.GetTokenHeaders(userCred)
+	_, ret, err := httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "POST", url, header, input, false)
+	return ret, err
+}
+
+func (p *SPodDriver) RequestExecSyncContainer(ctx context.Context, userCred mcclient.TokenCredential, container *models.SContainer, input *api.ContainerExecSyncInput) (jsonutils.JSONObject, error) {
+	return p.requestContainerSyncAction(ctx, userCred, container, "exec-sync", jsonutils.Marshal(input))
+}
+
+func (p *SPodDriver) RequestSetContainerResourcesLimit(ctx context.Context, userCred mcclient.TokenCredential, container *models.SContainer, limit *apis.ContainerResources) (jsonutils.JSONObject, error) {
+	return p.requestContainerSyncAction(ctx, userCred, container, "set-resources-limit", jsonutils.Marshal(limit))
+}
+
 func (p *SPodDriver) OnDeleteGuestFinalCleanup(ctx context.Context, guest *models.SGuest, userCred mcclient.TokenCredential) error {
 	// clean disk records in DB
 	return guest.DeleteAllDisksInDB(ctx, userCred)
@@ -493,8 +548,8 @@ func (p *SPodDriver) RequestRebuildRootDisk(ctx context.Context, guest *models.S
 	return p.newUnsupportOperationError("rebuild root")
 }
 
-func (p *SPodDriver) GetRandomNetworkTypes() []string {
-	return []string{api.NETWORK_TYPE_CONTAINER, api.NETWORK_TYPE_GUEST}
+func (p *SPodDriver) GetRandomNetworkTypes() []api.TNetworkType {
+	return []api.TNetworkType{api.NETWORK_TYPE_CONTAINER, api.NETWORK_TYPE_GUEST, api.NETWORK_TYPE_HOSTLOCAL}
 }
 
 func (p *SPodDriver) IsSupportGuestClone() bool {
@@ -509,10 +564,126 @@ func (p *SPodDriver) IsSupportFloppy(guest *models.SGuest) (bool, error) {
 	return false, nil
 }
 
-func (p *SPodDriver) GetChangeConfigStatus(guest *models.SGuest) ([]string, error) {
+func (p *SPodDriver) GetChangeInstanceTypeStatus() ([]string, error) {
 	return []string{api.VM_READY}, nil
 }
 
 func (p *SPodDriver) RequestSaveVolumeMountImage(ctx context.Context, userCred mcclient.TokenCredential, task models.IContainerTask) error {
 	return p.performContainerAction(ctx, userCred, task, "save-volume-mount-to-image", task.GetParams())
+}
+
+func (p *SPodDriver) RequestCommitContainer(ctx context.Context, userCred mcclient.TokenCredential, task models.IContainerTask) error {
+	return p.performContainerAction(ctx, userCred, task, "commit", task.GetParams())
+}
+
+func (p *SPodDriver) RequestDiskSnapshot(ctx context.Context, guest *models.SGuest, task taskman.ITask, snapshotId, diskId string) error {
+	/*if guest.GetStatus() != api.VM_READY {
+		return httperrors.NewNotAcceptableError("pod status %s is not ready", guest.GetStatus())
+	}*/
+	return p.SKVMGuestDriver.RequestDiskSnapshot(ctx, guest, task, snapshotId, diskId)
+}
+
+func (p *SPodDriver) RequestDeleteSnapshot(ctx context.Context, guest *models.SGuest, task taskman.ITask, params *jsonutils.JSONDict) error {
+	/*if guest.GetStatus() != api.VM_READY {
+		return httperrors.NewNotAcceptableError("pod status %s is not ready", guest.GetStatus())
+	}*/
+	return p.SKVMGuestDriver.RequestDeleteSnapshot(ctx, guest, task, params)
+}
+
+func (p *SPodDriver) BeforeDetachIsolatedDevice(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, dev *models.SIsolatedDevice) error {
+	ctrs, err := models.GetContainerManager().GetContainersByPod(guest.GetId())
+	if err != nil {
+		return errors.Wrapf(err, "get containers by pod %s", guest.GetId())
+	}
+	for _, ctr := range ctrs {
+		ctrPtr := &ctr
+		spec := ctrPtr.Spec
+		devs := spec.Devices
+		newDevs := make([]*api.ContainerDevice, 0)
+		releasedDevs := make(map[string]models.ContainerReleasedDevice)
+		for _, curDev := range devs {
+			if curDev.IsolatedDevice == nil || curDev.IsolatedDevice.Id != dev.GetId() {
+				tmpDev := curDev
+				newDevs = append(newDevs, tmpDev)
+			} else {
+				releasedDevs[curDev.IsolatedDevice.Id] = *models.NewContainerReleasedDevice(curDev, dev.DevType, dev.Model)
+			}
+		}
+		if err := ctrPtr.SaveReleasedDevices(ctx, userCred, releasedDevs); err != nil {
+			return errors.Wrapf(err, "save release devices for container %s", ctr.GetId())
+		}
+		if _, err := db.Update(ctrPtr, func() error {
+			ctrPtr.Spec.Devices = newDevs
+			return nil
+		}); err != nil {
+			return errors.Wrapf(err, "update container %s devs", ctrPtr.GetId())
+		}
+	}
+	return nil
+}
+
+func (p *SPodDriver) BeforeAttachIsolatedDevice(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, dev *models.SIsolatedDevice) error {
+	ctrs, err := models.GetContainerManager().GetContainersByPod(guest.GetId())
+	if err != nil {
+		return errors.Wrapf(err, "get containers by pod %s", guest.GetId())
+	}
+	for _, ctr := range ctrs {
+		ctrPtr := &ctr
+		if err := p.attachIsolatedDeviceToContainer(ctx, userCred, ctrPtr, dev); err != nil {
+			return errors.Wrapf(err, "attach isolated device to container %s", ctr.GetId())
+		}
+	}
+	return nil
+}
+
+func (p *SPodDriver) attachIsolatedDeviceToContainer(ctx context.Context, userCred mcclient.TokenCredential, ctrPtr *models.SContainer, dev *models.SIsolatedDevice) error {
+	rlsDevs, err := ctrPtr.GetReleasedDevices(ctx, userCred)
+	if err != nil {
+		return errors.Wrapf(err, "get release devices for container %s", ctrPtr.GetId())
+	}
+	spec := new(api.ContainerSpec)
+	if err := jsonutils.Marshal(ctrPtr.Spec).Unmarshal(spec); err != nil {
+		return errors.Wrap(err, "deep copy spec")
+	}
+	// attach it
+	if spec.Devices == nil {
+		spec.Devices = make([]*api.ContainerDevice, 0)
+	}
+	shouldUpdate := true
+	for _, curDev := range spec.Devices {
+		if curDev.IsolatedDevice == nil {
+			continue
+		}
+		if curDev.IsolatedDevice.Id == dev.GetId() {
+			shouldUpdate = false
+			break
+		}
+	}
+	if shouldUpdate {
+		spec.Devices = append(spec.Devices, &api.ContainerDevice{
+			Type: apis.CONTAINER_DEVICE_TYPE_ISOLATED_DEVICE,
+			IsolatedDevice: &api.ContainerIsolatedDevice{
+				Id: dev.GetId(),
+			},
+		})
+		if _, err := db.Update(ctrPtr, func() error {
+			ctrPtr.Spec = spec
+			return nil
+		}); err != nil {
+			return errors.Wrapf(err, "update container %s devs", ctrPtr.GetId())
+		}
+	}
+	for id, rlsDev := range rlsDevs {
+		if rlsDev.IsolatedDevice == nil {
+			continue
+		}
+		if rlsDev.DeviceModel == dev.Model && rlsDev.DeviceType == dev.DevType {
+			delete(rlsDevs, id)
+			if err := ctrPtr.SaveReleasedDevices(ctx, userCred, rlsDevs); err != nil {
+				return errors.Wrapf(err, "save release devices for container %s", ctrPtr.GetId())
+			}
+			return nil
+		}
+	}
+	return nil
 }

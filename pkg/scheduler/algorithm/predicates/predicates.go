@@ -33,6 +33,8 @@ import (
 	"strings"
 	"sync"
 
+	"golang.org/x/sync/errgroup"
+
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/gotypes"
@@ -60,7 +62,9 @@ func (b *BasePredicate) PreExecute(ctx context.Context, unit *core.Unit, candis 
 }
 
 func (b *BasePredicate) GetHypervisorDriver(u *core.Unit) models.IGuestDriver {
-	return models.GetDriver(u.GetHypervisor())
+	hypervisor := u.GetHypervisor()
+	driver, _ := models.GetDriver(hypervisor, u.SchedInfo.Provider)
+	return driver
 }
 
 type PredicateHelper struct {
@@ -280,6 +284,7 @@ type BaseSchedtagPredicate struct {
 	CandidateInputResources *CandidateInputResourcesMap
 
 	Hypervisor string
+	Provider   string
 }
 
 func NewBaseSchedtagPredicate() *BaseSchedtagPredicate {
@@ -344,19 +349,20 @@ func (w SchedtagResourceW) GetDynamicSchedDesc() *jsonutils.JSONDict {
 }
 
 func (p *BaseSchedtagPredicate) GetHypervisorDriver() models.IGuestDriver {
-	return models.GetDriver(p.Hypervisor)
+	hypervisor := p.Hypervisor
+	if hypervisor == api.HostHypervisorForKvm {
+		hypervisor = api.SchedTypeKvm
+	}
+	driver, _ := models.GetDriver(hypervisor, p.Provider)
+	return driver
 }
 
-func (p *BaseSchedtagPredicate) check(input ISchedtagCustomer, candidate ISchedtagCandidateResource, u *core.Unit, c core.Candidater) (*PredicatedSchedtagResource, error) {
+func (p *BaseSchedtagPredicate) check(input ISchedtagCustomer, candidate ISchedtagCandidateResource, u *core.Unit, c core.Candidater, allTags []schedtag.ISchedtag) (*PredicatedSchedtagResource, error) {
 	// allTags, err := GetAllSchedtags(getSchedtagResourceType(candidate))
 	// sMan, err := schedtag.GetSessionManager(u.SessionID())
 	// if err != nil {
 	// 	return nil, err
 	// }
-	allTags, err := schedtag.GetAllSchedtags(getSchedtagResourceType(candidate))
-	if err != nil {
-		return nil, err
-	}
 	tagPredicate := NewSchedtagPredicate(input.GetSchedtags(), allTags)
 	res := &PredicatedSchedtagResource{
 		ISchedtagCandidateResource: candidate,
@@ -376,22 +382,39 @@ func (p *BaseSchedtagPredicate) check(input ISchedtagCustomer, candidate ISchedt
 	return res, nil
 }
 
-func (p *BaseSchedtagPredicate) checkResources(input ISchedtagCustomer, ress []ISchedtagCandidateResource, u *core.Unit, c core.Candidater) ([]*PredicatedSchedtagResource, error) {
-	errs := make([]error, 0)
-	ret := make([]*PredicatedSchedtagResource, 0)
-	for _, res := range ress {
-		ps, err := p.check(input, res, u, c)
-		if err != nil {
-			// append err, resource not suit input customer
-			errs = append(errs, err)
-			continue
+func (p *BaseSchedtagPredicate) checkResources(input ISchedtagCustomer, ress []ISchedtagCandidateResource, u *core.Unit, c core.Candidater, allTags []schedtag.ISchedtag) ([]*PredicatedSchedtagResource, error) {
+	errs := make([]error, len(ress))
+	ret := make([]*PredicatedSchedtagResource, len(ress))
+	errGrp := errgroup.Group{}
+	for i := range ress {
+		res := ress[i]
+		errGrp.Go(func() error {
+			ps, err := p.check(input, res, u, c, allTags)
+			if err != nil {
+				// append err, resource not suit input customer
+				errs[i] = err
+			} else {
+				ret[i] = ps
+			}
+			return nil
+		})
+	}
+	if err := errGrp.Wait(); err != nil {
+		return nil, fmt.Errorf("errGrp.Wait: %v", err)
+	}
+	newRet := make([]*PredicatedSchedtagResource, 0)
+	newErrs := make([]error, 0)
+	for i := range ress {
+		if ps := ret[i]; ps != nil {
+			newRet = append(newRet, ps)
+		} else {
+			newErrs = append(newErrs, errs[i])
 		}
-		ret = append(ret, ps)
 	}
-	if len(ret) == 0 {
-		return nil, errors.NewAggregate(errs)
+	if len(newRet) == 0 {
+		return nil, errors.NewAggregate(newErrs)
 	}
-	return ret, nil
+	return newRet, nil
 }
 
 func (p *BaseSchedtagPredicate) GetInputResourcesMap(candidateId string) SchedtagInputResourcesMap {
@@ -409,7 +432,12 @@ func (p *BaseSchedtagPredicate) PreExecute(ctx context.Context, sp ISchedtagPred
 		return false, nil
 	}
 
+	if u.SchedData().ResetCpuNumaPin {
+		return false, nil
+	}
+
 	p.Hypervisor = u.GetHypervisor()
+	p.Provider = u.SchedInfo.Provider
 
 	// always do select step
 	u.AppendSelectPlugin(sp)
@@ -422,8 +450,10 @@ func (p *BaseSchedtagPredicate) Execute(
 	u *core.Unit,
 	c core.Candidater,
 ) (bool, []core.PredicateFailureReason, error) {
+	//inputTime := time.Now()
 	inputs := sp.GetInputs(u)
 	resources := sp.GetResources(c)
+	//log.Infof("=======%s get input time: %s, inputs: %s", sp.Name(), time.Since(inputTime), jsonutils.Marshal(inputs))
 
 	h := NewPredicateHelper(sp, u, c)
 
@@ -459,7 +489,14 @@ func (p *BaseSchedtagPredicate) Execute(
 			filterErrs = append(filterErrs, errs...)
 		}
 
-		matchedResources, err := p.checkResources(input, fitResources, u, c)
+		allTags, err := schedtag.GetAllSchedtags(getSchedtagResourceType(fitResources[0]))
+		if err != nil {
+			h.Exclude(fmt.Sprintf("get all schedtags"))
+			break
+		}
+		//checkTime := time.Now()
+		matchedResources, err := p.checkResources(input, fitResources, u, c, allTags)
+		//log.Infof("---%s checkResources time: %s", sp.Name(), time.Since(checkTime))
 		if err != nil {
 			if len(filterErrs) > 0 {
 				h.ExcludeByErrors(filterErrs)
@@ -470,6 +507,7 @@ func (p *BaseSchedtagPredicate) Execute(
 		inputRes[idx] = matchedResources
 	}
 
+	//log.Infof("=======%s get execute time: %s", sp.Name(), time.Since(inputTime))
 	return h.GetResult()
 }
 

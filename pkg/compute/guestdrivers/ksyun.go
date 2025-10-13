@@ -15,9 +15,12 @@
 package guestdrivers
 
 import (
+	"fmt"
+
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
 	"yunion.io/x/pkg/util/billing"
 	"yunion.io/x/pkg/util/rbacscope"
+	"yunion.io/x/pkg/utils"
 
 	api "yunion.io/x/onecloud/pkg/apis/compute"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/quotas"
@@ -34,8 +37,6 @@ func init() {
 	models.RegisterGuestDriver(&driver)
 }
 
-func (self *SKsyunGuestDriver) DoScheduleSKUFilter() bool { return false }
-
 func (self *SKsyunGuestDriver) GetHypervisor() string {
 	return api.HYPERVISOR_KSYUN
 }
@@ -50,6 +51,56 @@ func (self *SKsyunGuestDriver) GetDefaultSysDiskBackend() string {
 
 func (self *SKsyunGuestDriver) GetMinimalSysDiskSizeGb() int {
 	return 20
+}
+
+func (self *SKsyunGuestDriver) GetStorageTypes() []string {
+	return []string{
+		api.STORAGE_KSYUN_ESSD_AUTO_PL,
+		api.STORAGE_KSYUN_SSD3_0,
+		api.STORAGE_KSYUN_EHDD,
+		api.STORAGE_KSYUN_ESSD_PL1,
+		api.STORAGE_KSYUN_ESSD_PL2,
+		api.STORAGE_KSYUN_ESSD_PL3,
+	}
+}
+
+func (self *SKsyunGuestDriver) ChooseHostStorage(host *models.SHost, guest *models.SGuest, diskConfig *api.DiskConfig, storageIds []string) (*models.SStorage, error) {
+	return chooseHostStorage(self, host, diskConfig.Backend, storageIds), nil
+}
+
+func (self *SKsyunGuestDriver) GetDetachDiskStatus() ([]string, error) {
+	return []string{api.VM_READY, api.VM_RUNNING}, nil
+}
+
+func (self *SKsyunGuestDriver) GetAttachDiskStatus() ([]string, error) {
+	return []string{api.VM_READY, api.VM_RUNNING}, nil
+}
+
+func (self *SKsyunGuestDriver) GetRebuildRootStatus() ([]string, error) {
+	return []string{api.VM_READY}, nil
+}
+
+func (self *SKsyunGuestDriver) IsAllowSaveImageOnRunning() bool {
+	return true
+}
+
+func (self *SKsyunGuestDriver) GetChangeInstanceTypeStatus() ([]string, error) {
+	return []string{api.VM_READY, api.VM_RUNNING}, nil
+}
+
+func (self *SKsyunGuestDriver) GetDeployStatus() ([]string, error) {
+	return []string{api.VM_READY, api.VM_RUNNING}, nil
+}
+
+func (self *SKsyunGuestDriver) GetGuestInitialStateAfterRebuild() string {
+	return api.VM_RUNNING
+}
+
+func (self *SKsyunGuestDriver) ValidateResizeDisk(guest *models.SGuest, disk *models.SDisk, storage *models.SStorage) error {
+	if !utils.IsInStringArray(guest.Status, []string{api.VM_READY, api.VM_RUNNING}) {
+		return fmt.Errorf("Cannot resize disk when guest in status %s", guest.Status)
+	}
+	return nil
 }
 
 func (self *SKsyunGuestDriver) GetComputeQuotaKeys(scope rbacscope.TRbacScope, ownerId mcclient.IIdentityProvider, brand string) models.SComputeResourceKeys {
@@ -76,15 +127,27 @@ func (self *SKsyunGuestDriver) GetInstanceCapability() cloudprovider.SInstanceCa
 				Changeable:     false,
 			},
 		},
+		Storages: cloudprovider.Storage{
+			DataDisk: []cloudprovider.StorageInfo{
+				{StorageType: api.STORAGE_KSYUN_SSD3_0, MaxSizeGb: 65535, MinSizeGb: 1, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_KSYUN_EHDD, MaxSizeGb: 65535, MinSizeGb: 1, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_KSYUN_ESSD_PL1, MaxSizeGb: 65535, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_KSYUN_ESSD_PL2, MaxSizeGb: 65535, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_KSYUN_ESSD_PL3, MaxSizeGb: 65535, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
+			},
+			SysDisk: []cloudprovider.StorageInfo{
+				{StorageType: api.STORAGE_KSYUN_SSD3_0, MaxSizeGb: 65535, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_KSYUN_EHDD, MaxSizeGb: 65535, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_KSYUN_ESSD_PL1, MaxSizeGb: 65535, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_KSYUN_ESSD_PL2, MaxSizeGb: 65535, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
+				{StorageType: api.STORAGE_KSYUN_ESSD_PL3, MaxSizeGb: 65535, MinSizeGb: 20, StepSizeGb: 1, Resizable: true},
+			},
+		},
 	}
 }
 
 func (self *SKsyunGuestDriver) GetGuestInitialStateAfterCreate() string {
-	return api.VM_READY
-}
-
-func (self *SKsyunGuestDriver) GetGuestInitialStateAfterRebuild() string {
-	return api.VM_READY
+	return api.VM_RUNNING
 }
 
 func (self *SKsyunGuestDriver) AllowReconfigGuest() bool {
@@ -92,6 +155,9 @@ func (self *SKsyunGuestDriver) AllowReconfigGuest() bool {
 }
 
 func (self *SKsyunGuestDriver) IsSupportedBillingCycle(bc billing.SBillingCycle) bool {
+	if bc.GetMonths() >= 1 && bc.GetMonths() <= 36 {
+		return true
+	}
 	return false
 }
 
@@ -100,5 +166,13 @@ func (self *SKsyunGuestDriver) IsSupportPublicipToEip() bool {
 }
 
 func (self *SKsyunGuestDriver) IsSupportSetAutoRenew() bool {
+	return false
+}
+
+func (self *SKsyunGuestDriver) IsSupportShutdownMode() bool {
+	return true
+}
+
+func (self *SKsyunGuestDriver) IsNeedRestartForResetLoginInfo() bool {
 	return false
 }

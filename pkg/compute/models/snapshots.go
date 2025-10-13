@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"yunion.io/x/cloudmux/pkg/cloudprovider"
@@ -83,10 +84,8 @@ type SSnapshot struct {
 	// create disk from snapshot, snapshot as disk backing file
 	RefCount int `nullable:"false" default:"0" list:"user"`
 
-	// 区域Id
-	// CloudregionId string    `width:"36" charset:"ascii" nullable:"true" list:"user" create:"optional"`
-
 	BackingDiskId string    `width:"36" charset:"ascii" nullable:"true" default:""`
+	DiskBackupId  string    `width:"36" charset:"ascii" nullable:"true" default:""`
 	ExpiredAt     time.Time `nullable:"true" list:"user" create:"optional"`
 }
 
@@ -205,6 +204,15 @@ func (manager *SSnapshotManager) ListItemFilter(
 		q = q.In("disk_id", gdq)
 	}
 
+	if query.Unused {
+		sq := DiskManager.Query("id").Distinct().SubQuery()
+		q = q.NotIn("disk_id", sq)
+	}
+
+	if len(query.StorageId) > 0 {
+		q = q.Equals("storage_id", query.StorageId)
+	}
+
 	return q, nil
 }
 
@@ -287,6 +295,22 @@ func (manager *SSnapshotManager) QueryDistinctExtraField(q *sqlchemy.SQuery, fie
 		return q, nil
 	}
 
+	return q, httperrors.ErrNotFound
+}
+
+func (manager *SSnapshotManager) QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error) {
+	switch resource {
+	case StorageManager.Keyword():
+		storages := StorageManager.Query().SubQuery()
+		for _, field := range fields {
+			q = q.AppendField(storages.Field(field))
+		}
+		q = q.Join(storages, sqlchemy.Equals(q.Field("storage_id"), storages.Field("id")))
+		return q, nil
+
+	case CloudproviderManager.Keyword():
+		return manager.SManagedResourceBaseManager.QueryDistinctExtraFields(q, resource, fields)
+	}
 	return q, httperrors.ErrNotFound
 }
 
@@ -391,6 +415,7 @@ func (manager *SSnapshotManager) FetchCustomizeColumns(
 	for i := range rows {
 		if storage, ok := storages[storageIds[i]]; ok {
 			rows[i].StorageType = storage.StorageType
+			rows[i].Storage = storage.Name
 		}
 		if disk, ok := disks[diskIds[i]]; ok {
 			rows[i].DiskStatus = disk.Status
@@ -410,11 +435,19 @@ func (manager *SSnapshotManager) FetchCustomizeColumns(
 func (self *SSnapshot) GetShortDesc(ctx context.Context) *jsonutils.JSONDict {
 	res := self.SVirtualResourceBase.GetShortDesc(ctx)
 	res.Add(jsonutils.NewInt(int64(self.Size)), "size")
+	res.Add(jsonutils.NewString(self.DiskId), "disk_id")
+	disk, _ := self.GetDisk()
+	if disk != nil {
+		if guest := disk.GetGuest(); guest != nil {
+			res.Add(jsonutils.NewString(guest.Id), "guest_id")
+		}
+	}
 	info := self.getCloudProviderInfo()
 	res.Update(jsonutils.Marshal(&info))
 	return res
 }
 
+// 创建快照
 func (manager *SSnapshotManager) ValidateCreateData(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
@@ -655,7 +688,7 @@ func (self *SSnapshotManager) GetDiskSnapshotCount(diskId string) (int, error) {
 }
 
 func (self *SSnapshotManager) CreateSnapshot(ctx context.Context, owner mcclient.IIdentityProvider,
-	createdBy, diskId, guestId, location, name string, retentionDay int, isSystem bool) (*SSnapshot, error) {
+	createdBy, diskId, guestId, location, name string, retentionDay int, isSystem bool, diskBackupId string) (*SSnapshot, error) {
 	iDisk, err := DiskManager.FetchById(diskId)
 	if err != nil {
 		return nil, err
@@ -693,6 +726,7 @@ func (self *SSnapshotManager) CreateSnapshot(ctx context.Context, owner mcclient
 		snapshot.ExpiredAt = time.Now().AddDate(0, 0, retentionDay)
 	}
 	snapshot.IsSystem = isSystem
+	snapshot.DiskBackupId = diskBackupId
 	err = SnapshotManager.TableSpec().Insert(ctx, snapshot)
 	if err != nil {
 		return nil, err
@@ -700,9 +734,14 @@ func (self *SSnapshotManager) CreateSnapshot(ctx context.Context, owner mcclient
 	return snapshot, nil
 }
 
-func (self *SSnapshot) StartSnapshotDeleteTask(ctx context.Context, userCred mcclient.TokenCredential, reloadDisk bool, parentTaskId string) error {
+func (self *SSnapshot) StartSnapshotDeleteTask(ctx context.Context, userCred mcclient.TokenCredential, reloadDisk bool, parentTaskId string, deleteSnapshotTotalCnt int, deletedSnapshotCnt int) error {
 	params := jsonutils.NewDict()
 	params.Set("reload_disk", jsonutils.NewBool(reloadDisk))
+	if deleteSnapshotTotalCnt <= 0 {
+		deleteSnapshotTotalCnt = 1
+	}
+	params.Set("snapshot_total_count", jsonutils.NewInt(int64(deleteSnapshotTotalCnt)))
+	params.Set("deleted_snapshot_count", jsonutils.NewInt(int64(deletedSnapshotCnt)))
 	self.SetStatus(ctx, userCred, api.SNAPSHOT_DELETING, "")
 	task, err := taskman.TaskManager.NewTask(ctx, "SnapshotDeleteTask", self, userCred, params, parentTaskId, "", nil)
 	if err != nil {
@@ -766,9 +805,10 @@ func (self *SSnapshot) GetRegionDriver() IRegionDriver {
 }
 
 func (self *SSnapshot) CustomizeDelete(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) error {
-	return self.StartSnapshotDeleteTask(ctx, userCred, false, "")
+	return self.StartSnapshotDeleteTask(ctx, userCred, false, "", 0, 0)
 }
 
+// +onecloud:swagger-gen-ignore
 func (self *SSnapshot) PerformDeleted(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	_, err := db.Update(self, func() error {
 		self.OutOfChain = true
@@ -777,7 +817,7 @@ func (self *SSnapshot) PerformDeleted(ctx context.Context, userCred mcclient.Tok
 	if err != nil {
 		return nil, err
 	}
-	err = self.StartSnapshotDeleteTask(ctx, userCred, true, "")
+	err = self.StartSnapshotDeleteTask(ctx, userCred, true, "", 0, 0)
 	return nil, err
 }
 
@@ -809,29 +849,30 @@ func (self *SSnapshotManager) GetConvertSnapshot(deleteSnapshot *SSnapshot) (*SS
 	return dest, nil
 }
 
-func (self *SSnapshotManager) PerformDeleteDiskSnapshots(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
-	diskId, err := data.GetString("disk_id")
-	if err != nil {
-		return nil, err
-	}
-	disk, err := DiskManager.FetchById(diskId)
+// +onecloud:swagger-gen-ignore
+func (self *SSnapshotManager) PerformDeleteDiskSnapshots(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input api.SnapshotDeleteDiskSnapshotsInput) (jsonutils.JSONObject, error) {
+	disk, err := DiskManager.FetchById(input.DiskId)
 	if disk != nil {
-		return nil, httperrors.NewBadRequestError("Cannot Delete disk %s snapshots, disk exist", diskId)
+		return nil, httperrors.NewBadRequestError("Cannot Delete disk %s snapshots, disk exist", input.DiskId)
 	}
-	snapshots := self.GetDiskSnapshots(diskId)
+	snapshots := self.GetDiskSnapshots(input.DiskId)
 	if snapshots == nil || len(snapshots) == 0 {
-		return nil, httperrors.NewNotFoundError("Disk %s dose not have snapshot", diskId)
+		return nil, httperrors.NewNotFoundError("Disk %s dose not have snapshot", input.DiskId)
 	}
+	snapshotIds := []string{}
 	for i := 0; i < len(snapshots); i++ {
 		if snapshots[i].FakeDeleted == false {
 			return nil, httperrors.NewBadRequestError("Can not delete disk snapshots, have manual snapshot")
 		}
+		snapshotIds = append(snapshotIds, snapshots[i].Id)
 	}
-	err = snapshots[0].StartSnapshotsDeleteTask(ctx, userCred, "")
+	err = snapshots[0].StartSnapshotsDeleteTask(ctx, userCred, "", snapshotIds)
 	return nil, err
 }
 
-func (self *SSnapshot) StartSnapshotsDeleteTask(ctx context.Context, userCred mcclient.TokenCredential, parentTaskId string) error {
+func (self *SSnapshot) StartSnapshotsDeleteTask(ctx context.Context, userCred mcclient.TokenCredential, parentTaskId string, snapshotIds []string) error {
+	data := jsonutils.NewDict()
+	data.Set("snapshot_ids", jsonutils.NewStringArray(snapshotIds))
 	task, err := taskman.TaskManager.NewTask(ctx, "BatchSnapshotsDeleteTask", self, userCred, nil, parentTaskId, "", nil)
 	if err != nil {
 		log.Errorln(err)
@@ -1118,6 +1159,7 @@ func (self *SSnapshot) GetISnapshotRegion(ctx context.Context) (cloudprovider.IC
 	return provider.GetIRegionById(region.GetExternalId())
 }
 
+// +onecloud:swagger-gen-ignore
 func (self *SSnapshot) PerformPurge(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	err := self.GetRegionDriver().ValidateSnapshotDelete(ctx, self)
 	if err != nil {
@@ -1144,7 +1186,17 @@ func (manager *SSnapshotManager) GetResourceCount() ([]db.SScopeResourceCount, e
 	return db.CalculateResourceCount(virts, "tenant_id")
 }
 
+var SnapshotCleanupTaskRunning int32 = 0
+
+func SnapshotCleanupTaskIsRunning() bool {
+	return atomic.LoadInt32(&SnapshotCleanupTaskRunning) == 1
+}
+
 func (manager *SSnapshotManager) CleanupSnapshots(ctx context.Context, userCred mcclient.TokenCredential, isStart bool) {
+	if SnapshotCleanupTaskIsRunning() {
+		log.Errorf("Previous CleanupSnapshots tasks still running !!!")
+		return
+	}
 	var now = time.Now()
 	var snapshot = new(SSnapshot)
 	err := manager.Query().
@@ -1165,6 +1217,77 @@ func (manager *SSnapshotManager) CleanupSnapshots(ctx context.Context, userCred 
 		log.Errorf("Start snaphsot cleanup task failed %s", err)
 		return
 	}
+
+	sq := manager.Query().Equals("status", api.SNAPSHOT_READY).Equals("created_by", api.SNAPSHOT_AUTO).Equals("fake_deleted", false).SubQuery()
+
+	disks := []struct {
+		DiskCnt int
+		DiskId  string
+	}{}
+	q := sq.Query(
+		sqlchemy.COUNT("disk_cnt", sq.Field("disk_id")),
+		sq.Field("disk_id"),
+	).GroupBy(sq.Field("disk_id"))
+	err = q.All(&disks)
+	if err != nil {
+		log.Errorf("Cleanup snapshots job fetch disk count failed %s", err)
+		return
+	}
+
+	diskCount := map[string]int{}
+	for i := range disks {
+		diskCount[disks[i].DiskId] = disks[i].DiskCnt
+	}
+
+	{
+		sq = SnapshotPolicyManager.Query().Equals("type", api.SNAPSHOT_POLICY_TYPE_DISK).GT("retention_count", 0).SubQuery()
+		spd := SnapshotPolicyDiskManager.Query().SubQuery()
+		q = sq.Query(
+			sq.Field("retention_count"),
+			spd.Field("disk_id"),
+		)
+		q = q.Join(spd, sqlchemy.Equals(q.Field("id"), spd.Field("snapshotpolicy_id")))
+
+		diskRetentions := []struct {
+			DiskId         string
+			RetentionCount int
+		}{}
+		err = q.All(&diskRetentions)
+		if err != nil {
+			log.Errorf("Cleanup snapshots job fetch disk retentions failed %s", err)
+			return
+		}
+
+		diskRetentionMap := map[string]int{}
+		for i := range diskRetentions {
+			if _, ok := diskRetentionMap[diskRetentions[i].DiskId]; !ok {
+				diskRetentionMap[diskRetentions[i].DiskId] = diskRetentions[i].RetentionCount
+			}
+			// 取最小保留个数
+			if diskRetentionMap[diskRetentions[i].DiskId] > diskRetentions[i].RetentionCount {
+				diskRetentionMap[diskRetentions[i].DiskId] = diskRetentions[i].RetentionCount
+			}
+		}
+
+		for diskId, retentionCnt := range diskRetentionMap {
+			if cnt, ok := diskCount[diskId]; ok && cnt > retentionCnt {
+				manager.startCleanupRetentionCount(ctx, userCred, diskId, cnt-retentionCnt)
+			}
+		}
+	}
+}
+
+func (manager *SSnapshotManager) startCleanupRetentionCount(ctx context.Context, userCred mcclient.TokenCredential, diskId string, cnt int) error {
+	q := manager.Query().Equals("disk_id", diskId).Equals("created_by", api.SNAPSHOT_AUTO).Asc("created_at").Limit(cnt)
+	snapshots := []SSnapshot{}
+	err := db.FetchModelObjects(manager, q, &snapshots)
+	if err != nil {
+		return errors.Wrapf(err, "FetchModelObjects")
+	}
+	for i := range snapshots {
+		snapshots[i].StartSnapshotDeleteTask(ctx, userCred, false, "", 0, 0)
+	}
+	return nil
 }
 
 func (manager *SSnapshotManager) StartSnapshotCleanupTask(

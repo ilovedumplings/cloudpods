@@ -92,8 +92,10 @@ func (man *SSessionManager) Get(accessToken string) (*SSession, bool) {
 	s := obj.(*SSession)
 	protocol := s.GetProtocol()
 	if protocol != SPICE && time.Since(s.AccessedAt) < AccessInterval {
-		log.Warningf("Protol: %q, Token: %s, Session: %s can't be accessed during %s, last accessed at: %s", s.GetProtocol(), accessToken, s.Id, AccessInterval, s.AccessedAt)
-		return nil, false
+		if !(protocol == WS && o.Options.KeepWebsocketSession) {
+			log.Warningf("Protol: %q, Token: %s, Session: %s can't be accessed during %s, last accessed at: %s", s.GetProtocol(), accessToken, s.Id, AccessInterval, s.AccessedAt)
+			return nil, false
+		}
 	}
 	s.AccessedAt = time.Now()
 	return s, true
@@ -104,6 +106,13 @@ type ISessionData interface {
 	IsNeedLogin() (bool, error)
 	GetId() string
 	GetDisplayInfo(ctx context.Context) (*SDisplayInfo, error)
+}
+
+type ISessionCommand interface {
+	command.ICommand
+
+	GetInstanceName() string
+	GetIPs() []string
 }
 
 type RandomSessionData struct {
@@ -134,6 +143,17 @@ func (s *RandomSessionData) GetDisplayInfo(ctx context.Context) (*SDisplayInfo, 
 	dispInfo := SDisplayInfo{}
 	dispInfo.WaterMark = fetchWaterMark(userInfo)
 	dispInfo.InstanceName = s.GetCommand().String()
+	si, ok := s.ICommand.(ISessionCommand)
+	if ok {
+		iName := si.GetInstanceName()
+		if iName != "" {
+			dispInfo.InstanceName = iName
+		}
+		ips := si.GetIPs()
+		if len(ips) > 0 {
+			dispInfo.Ips = strings.Join(ips, ",")
+		}
+	}
 	return &dispInfo, nil
 }
 
@@ -174,6 +194,11 @@ func (s *SSession) GetConnectParams(params url.Values, dispInfo *SDisplayInfo) (
 		params.Set("login_error_message", fmt.Sprintf("%v", err))
 	}
 	params.Set("is_need_login", fmt.Sprintf("%v", isNeedLogin))
+
+	if len(o.Options.RefererWhitelist) > 0 {
+		params.Set("referer_whitelist", strings.Join(o.Options.RefererWhitelist, ","))
+	}
+
 	return params.Encode(), nil
 }
 

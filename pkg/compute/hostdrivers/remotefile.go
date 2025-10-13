@@ -36,10 +36,14 @@ func (self *SRemoteFileDriver) GetHypervisor() string {
 	return api.HYPERVISOR_REMOTEFILE
 }
 
+func (self *SRemoteFileDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_REMOTEFILE
+}
+
 func (self *SRemoteFileDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
 	return nil
 }
 
 func (driver *SRemoteFileDriver) GetStoragecacheQuota(host *models.SHost) int {
-	return 100
+	return -1
 }

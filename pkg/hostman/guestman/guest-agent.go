@@ -20,6 +20,8 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
 
+	"yunion.io/x/onecloud/pkg/hostman/guestman/desc"
+	deployapi "yunion.io/x/onecloud/pkg/hostman/hostdeployer/apis"
 	"yunion.io/x/onecloud/pkg/hostman/monitor"
 	"yunion.io/x/onecloud/pkg/httperrors"
 )
@@ -47,15 +49,11 @@ func (m *SGuestManager) QgaGuestSetPassword(ctx context.Context, params interfac
 		return nil, err
 	}
 
-	if guest.guestAgent.TryLock() {
-		defer guest.guestAgent.Unlock()
-		err = guest.guestAgent.GuestSetUserPassword(input.Username, input.Password, input.Crypted)
-		if err != nil {
-			return nil, errors.Wrap(err, "qga set user password")
-		}
-		return nil, nil
+	err = guest.guestAgent.GuestSetUserPassword(input.Username, input.Password, input.Crypted)
+	if err != nil {
+		return nil, errors.Wrap(err, "qga set user password")
 	}
-	return nil, errors.Errorf("qga unfinished last cmd, is qga unavailable?")
+	return nil, nil
 }
 
 func (m *SGuestManager) QgaGuestPing(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
@@ -69,16 +67,11 @@ func (m *SGuestManager) QgaGuestPing(ctx context.Context, params interface{}) (j
 	if to, err := input.Body.Int("timeout"); err == nil {
 		timeout = int(to)
 	}
-
-	if guest.guestAgent.TryLock() {
-		defer guest.guestAgent.Unlock()
-		err = guest.guestAgent.GuestPing(timeout)
-		if err != nil {
-			return nil, errors.Wrap(err, "qga guest ping")
-		}
-		return nil, nil
+	err = guest.guestAgent.GuestPing(timeout)
+	if err != nil {
+		return nil, errors.Wrap(err, "qga guest ping")
 	}
-	return nil, errors.Errorf("qga unfinished last cmd, is qga unavailable?")
+	return nil, nil
 }
 
 func (m *SGuestManager) QgaCommand(cmd *monitor.Command, sid string, execTimeout int) (string, error) {
@@ -87,21 +80,10 @@ func (m *SGuestManager) QgaCommand(cmd *monitor.Command, sid string, execTimeout
 		return "", err
 	}
 	var res []byte
-	if guest.guestAgent.TryLock() {
-		defer guest.guestAgent.Unlock()
-
-		if execTimeout > 0 {
-			guest.guestAgent.SetTimeout(execTimeout)
-			defer guest.guestAgent.ResetTimeout()
-		}
-		res, err = guest.guestAgent.QgaCommand(cmd)
-		if err != nil {
-			err = errors.Wrapf(err, "exec qga command %s", cmd.Execute)
-		}
-	} else {
-		err = errors.Errorf("qga unfinished last cmd, is qga unavailable?")
+	res, err = guest.guestAgent.QgaCommand(cmd, execTimeout)
+	if err != nil {
+		err = errors.Wrapf(err, "exec qga command %s", cmd.Execute)
 	}
-
 	return string(res), err
 }
 
@@ -111,37 +93,32 @@ func (m *SGuestManager) QgaGuestInfoTask(sid string) (string, error) {
 		return "", err
 	}
 	var res []byte
-	if guest.guestAgent.TryLock() {
-		defer guest.guestAgent.Unlock()
-		res, err = guest.guestAgent.GuestInfoTask()
-		if err != nil {
-			return "", errors.Wrap(err, "qga guest info task")
-		}
-		return string(res), nil
+	res, err = guest.guestAgent.GuestInfoTask()
+	if err != nil {
+		return "", errors.Wrap(err, "qga guest info task")
 	}
-	return "", errors.Errorf("qga unfinished last cmd, is qga unavailable?")
+	return string(res), nil
 }
 
-func (m *SGuestManager) QgaSetNetwork(netmod *monitor.NetworkModify, sid string, execTimeout int) (string, error) {
-	guest, err := m.checkAndInitGuestQga(sid)
-	if err != nil {
-		return "", err
+func (m *SGuestManager) QgaSetNetwork(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
+	input := params.(*SQgaGuestSetNetwork)
+	netmod := &monitor.NetworkModify{
+		Device:   input.Device,
+		Ipmask:   input.Ipmask,
+		Gateway:  input.Gateway,
+		Ip6mask:  input.Ip6mask,
+		Gateway6: input.Gateway6,
 	}
-	var res []byte
-	if guest.guestAgent.TryLock() {
-		defer guest.guestAgent.Unlock()
 
-		if execTimeout > 0 {
-			guest.guestAgent.SetTimeout(execTimeout)
-			defer guest.guestAgent.ResetTimeout()
-		}
-		err = guest.guestAgent.QgaSetNetwork(netmod)
-		if err != nil {
-			return "", errors.Wrapf(err, "modify %s network failed", netmod.Device)
-		}
-		return string(res), nil
+	guest, err := m.checkAndInitGuestQga(input.Sid)
+	if err != nil {
+		return nil, err
 	}
-	return "", errors.Errorf("qga unfinished last cmd, is qga unavailable?")
+	err = guest.guestAgent.QgaSetNetwork(netmod, deployapi.GuestNicsToServerNics(guest.Desc.Nics))
+	if err != nil {
+		return nil, errors.Wrapf(err, "modify %s network failed", netmod.Device)
+	}
+	return nil, nil
 }
 
 func (m *SGuestManager) QgaGetNetwork(sid string) (string, error) {
@@ -150,15 +127,11 @@ func (m *SGuestManager) QgaGetNetwork(sid string) (string, error) {
 		return "", err
 	}
 	var res []byte
-	if guest.guestAgent.TryLock() {
-		defer guest.guestAgent.Unlock()
-		res, err = guest.guestAgent.QgaGetNetwork()
-		if err != nil {
-			return "", errors.Wrap(err, "qga get network fail")
-		}
-		return string(res), nil
+	res, err = guest.guestAgent.QgaGetNetwork()
+	if err != nil {
+		return "", errors.Wrap(err, "qga get network fail")
 	}
-	return "", errors.Errorf("qga unfinished last cmd, is qga unavailable?")
+	return string(res), nil
 }
 
 func (m *SGuestManager) QgaGetOsInfo(sid string) (jsonutils.JSONObject, error) {
@@ -166,13 +139,22 @@ func (m *SGuestManager) QgaGetOsInfo(sid string) (jsonutils.JSONObject, error) {
 	if err != nil {
 		return nil, err
 	}
-	if guest.guestAgent.TryLock() {
-		defer guest.guestAgent.Unlock()
-		res, err := guest.guestAgent.QgaGuestGetOsInfo()
-		if err != nil {
-			return nil, errors.Wrap(err, "qga get os info fail")
-		}
-		return jsonutils.Marshal(res), nil
+
+	res, err := guest.guestAgent.QgaGuestGetOsInfo()
+	if err != nil {
+		return nil, errors.Wrap(err, "qga get os info fail")
 	}
-	return nil, errors.Errorf("qga unfinished last cmd, is qga unavailable?")
+	return jsonutils.Marshal(res), nil
+}
+
+func (guest *SKVMGuestInstance) QgaDeployNicsConfigure(nics []*desc.SGuestNetwork) error {
+	if guest.guestAgent == nil {
+		if err := guest.InitQga(); err != nil {
+			return errors.Wrap(err, "init qga")
+		}
+	}
+	if err := guest.guestAgent.GuestPing(1); err != nil {
+		return errors.Wrap(err, "Qga ping")
+	}
+	return guest.guestAgent.QgaDeployNics(deployapi.GuestNicsToServerNics(nics))
 }

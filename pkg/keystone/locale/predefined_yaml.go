@@ -44,6 +44,11 @@ policy:
       '*': deny
       list: allow
       get: allow
+    hosts:
+      '*': allow
+      perform:
+        '*': allow
+        login-info: deny
     servers:
       '*': allow
       perform:
@@ -82,6 +87,8 @@ policy:
   log:
     actions:
       list:
+        list: allow
+        get: allow
         '*': deny
         splitable: deny
 `
@@ -105,6 +112,7 @@ policy:
       list: allow
       perform:
         '*': deny
+        disable: allow
         change-owner: allow
         purge: allow
     dynamicschedtags:
@@ -130,6 +138,7 @@ policy:
       list: allow
       perform:
         '*': deny
+        disable: allow
         change-owner: allow
         add-secgroup: allow
         set-secgroup: allow
@@ -161,6 +170,7 @@ policy:
       list: allow
       perform:
         '*': deny
+        disable: allow
         change-owner: allow
         purge: allow
   log:
@@ -207,6 +217,7 @@ policy:
       '*': allow
       delete: deny
       perform:
+        disable: deny
         clone: deny
         snapshot-and-clone: deny
         purge: deny

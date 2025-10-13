@@ -48,7 +48,15 @@ func (self *SESXiHostDriver) GetHypervisor() string {
 	return api.HYPERVISOR_ESXI
 }
 
+func (self *SESXiHostDriver) GetProvider() string {
+	return api.CLOUD_PROVIDER_ONECLOUD
+}
+
 func (self *SESXiHostDriver) ValidateDiskSize(storage *models.SStorage, sizeGb int) error {
+	return nil
+}
+
+func (self *SESXiHostDriver) RequestRemoteUpdateDisk(ctx context.Context, userCred mcclient.TokenCredential, storage *models.SStorage, disk *models.SDisk, replaceTags bool) error {
 	return nil
 }
 
@@ -111,7 +119,7 @@ func (self *SESXiHostDriver) CheckAndSetCacheImage(ctx context.Context, userCred
 	storage := host.GetStorageByFilePath(storageCache.Path)
 	if storage == nil {
 		msg := fmt.Sprintf("fail to find storage for storageCache %s", storageCache.Path)
-		log.Errorf(msg)
+		log.Errorf("%s", msg)
 		return errors.Error(msg)
 	}
 

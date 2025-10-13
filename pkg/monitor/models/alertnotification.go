@@ -20,6 +20,7 @@ import (
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/sqlchemy"
 
 	"yunion.io/x/onecloud/pkg/apis/monitor"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
@@ -35,6 +36,7 @@ const (
 	AlertNotificationUsedByMigrationAlert = monitor.AlertNotificationUsedByMigrationAlert
 )
 
+// +onecloud:swagger-gen-ignore
 type SAlertNotificationManager struct {
 	SAlertJointsManager
 }
@@ -56,6 +58,7 @@ func init() {
 	})
 }
 
+// +onecloud:swagger-gen-ignore
 type SAlertnotification struct {
 	SAlertJointsBase
 	NotificationId string               `width:"36" charset:"ascii" nullable:"false" list:"user" create:"required"`
@@ -75,6 +78,14 @@ func (man *SAlertNotificationManager) Get(alertId string, notiId string) (*SAler
 	err := q.First(obj)
 	obj.SetModelManager(man, obj)
 	return obj, err
+}
+
+func (man *SAlertNotificationManager) ListItemFilter(
+	ctx context.Context,
+	q *sqlchemy.SQuery,
+	userCred mcclient.TokenCredential,
+	query monitor.AlertNotificationListInput) (*sqlchemy.SQuery, error) {
+	return man.SAlertJointsManager.ListItemFilter(ctx, q, userCred, query.AlertJointListInput)
 }
 
 func (man *SAlertNotificationManager) FetchCustomizeColumns(
@@ -104,6 +115,7 @@ func (man *SAlertNotificationManager) FetchCustomizeColumns(
 	for i := range rows {
 		if noti, ok := notis[notiIds[i]]; ok {
 			rows[i].Notification = noti.Name
+			rows[i].Frequency = noti.Frequency
 		}
 	}
 	return rows

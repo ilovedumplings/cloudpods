@@ -433,32 +433,6 @@ func createTenant(ctx context.Context, name, domainId, desc string) (string, str
 	return domainId, projectId, nil
 }
 
-func (account *SCloudaccount) getOrCreateTenant(ctx context.Context, name, domainId, projectId, desc string) (string, string, error) {
-	if len(domainId) == 0 {
-		domainId = account.DomainId
-	}
-	ctx = context.WithValue(ctx, time.Now().String(), utils.GenRequestId(20))
-	lockman.LockRawObject(ctx, domainId, name)
-	defer lockman.ReleaseRawObject(ctx, domainId, name)
-
-	tenant, err := getTenant(ctx, projectId, name, domainId)
-	if err != nil {
-		if errors.Cause(err) != sql.ErrNoRows {
-			return "", "", errors.Wrapf(err, "getTenan")
-		}
-		return createTenant(ctx, name, domainId, desc)
-	}
-	if tenant.PendingDeleted {
-		return createTenant(ctx, name, domainId, desc)
-	}
-	share := account.GetSharedInfo()
-	if tenant.DomainId == account.DomainId || (share.PublicScope == rbacscope.ScopeSystem ||
-		(share.PublicScope == rbacscope.ScopeDomain && utils.IsInStringArray(tenant.DomainId, share.SharedDomains))) {
-		return tenant.DomainId, tenant.Id, nil
-	}
-	return createTenant(ctx, name, domainId, desc)
-}
-
 func (cprvd *SCloudprovider) syncProject(ctx context.Context, userCred mcclient.TokenCredential) error {
 	account, err := cprvd.GetCloudaccount()
 	if err != nil {
@@ -899,7 +873,6 @@ func (cprvd *SCloudprovider) GetProvider(ctx context.Context) (cloudprovider.ICl
 	if err != nil {
 		return nil, errors.Wrapf(err, "GetCloudaccount")
 	}
-	defaultRegion, _ := jsonutils.Marshal(account.Options).GetString("default_region")
 	return cloudprovider.GetProvider(cloudprovider.ProviderConfig{
 		Id:        cprvd.Id,
 		Name:      cprvd.Name,
@@ -913,8 +886,8 @@ func (cprvd *SCloudprovider) GetProvider(ctx context.Context) (cloudprovider.ICl
 
 		ReadOnly: account.ReadOnly,
 
-		DefaultRegion: defaultRegion,
-		Options:       account.Options,
+		RegionId: account.regionId(),
+		Options:  account.Options,
 
 		UpdatePermission: account.UpdatePermission(ctx),
 	})
@@ -1275,13 +1248,20 @@ func (manager *SCloudproviderManager) ListItemFilter(
 	var region *SCloudregion
 
 	if len(query.ZoneId) > 0 {
-		_, err := validators.ValidateModel(ctx, userCred, ZoneManager, &query.ZoneId)
+		zoneObj, err := validators.ValidateModel(ctx, userCred, ZoneManager, &query.ZoneId)
 		if err != nil {
 			return nil, err
 		}
-		vpcs := VpcManager.Query("manager_id").Distinct()
-		wires := WireManager.Query().Equals("zone_id", query.ZoneId).SubQuery()
-		vpcs = vpcs.Join(wires, sqlchemy.Equals(vpcs.Field("id"), wires.Field("vpc_id")))
+		zone = zoneObj.(*SZone)
+		region, err = zone.GetRegion()
+		if err != nil {
+			return nil, err
+		}
+		vpcs := VpcManager.Query("manager_id").Equals("cloudregion_id", region.Id).Distinct()
+		if !utils.IsInStringArray(region.Provider, api.REGIONAL_NETWORK_PROVIDERS) {
+			wires := WireManager.Query().Equals("zone_id", query.ZoneId).SubQuery()
+			vpcs = vpcs.Join(wires, sqlchemy.Equals(vpcs.Field("id"), wires.Field("vpc_id")))
+		}
 		wireManager := WireManager.Query("manager_id").Equals("zone_id", query.ZoneId).Distinct().SubQuery()
 		q = q.Filter(
 			sqlchemy.OR(
@@ -1536,7 +1516,10 @@ func (provider *SCloudprovider) prepareCloudproviderRegions(ctx context.Context,
 		return nil, errors.Wrap(err, "CloudproviderCapabilityManager.setCapabilities")
 	}
 	if driver.GetFactory().IsOnPremise() {
-		cpr := CloudproviderRegionManager.FetchByIdsOrCreate(provider.Id, api.DEFAULT_REGION_ID)
+		cpr, err := CloudproviderRegionManager.FetchByIdsOrCreate(provider.Id, api.DEFAULT_REGION_ID)
+		if err != nil {
+			return nil, errors.Wrapf(err, "FetchByIdsOrCreate")
+		}
 		cpr.setCapabilities(ctx, userCred, driver.GetCapabilities())
 		return []SCloudproviderregion{*cpr}, nil
 	}
@@ -1947,17 +1930,6 @@ func (provider *SCloudprovider) GetChangeOwnerCandidateDomainIds() []string {
 	return []string{}
 }
 
-func (cprvd *SCloudprovider) SyncProject(ctx context.Context, userCred mcclient.TokenCredential, id string) (string, error) {
-	if cprvd.Provider == api.CLOUD_PROVIDER_AZURE || cprvd.Provider == api.CLOUD_PROVIDER_ALIYUN {
-		return cprvd.SyncManagerProject(ctx, userCred, id)
-	}
-	account, err := cprvd.GetCloudaccount()
-	if err != nil {
-		return "", errors.Wrapf(err, "GetCloudaccount")
-	}
-	return account.SyncProject(ctx, userCred, id)
-}
-
 func (cprvd *SCloudprovider) GetExternalProjectsByProjectIdOrName(projectId, name string) ([]SExternalProject, error) {
 	projects := []SExternalProject{}
 	q := ExternalProjectManager.Query().Equals("manager_id", cprvd.Id)
@@ -1974,14 +1946,12 @@ func (cprvd *SCloudprovider) GetExternalProjectsByProjectIdOrName(projectId, nam
 	return projects, nil
 }
 
-func (cprvd *SCloudprovider) SyncManagerProject(ctx context.Context, userCred mcclient.TokenCredential, id string) (string, error) {
-	lockman.LockRawObject(ctx, "projects", cprvd.Id)
-	defer lockman.ReleaseRawObject(ctx, "projects", cprvd.Id)
-
-	account, err := cprvd.GetCloudaccount()
-	if err != nil {
-		return "", errors.Wrapf(err, "GetCloudaccount")
-	}
+// 若本地项目映射了多个云上项目，则在根据优先级找优先级最大的云上项目
+// 若本地项目没有映射云上任何项目，则在云上新建一个同名项目
+// 若本地项目a映射云上项目b，但b项目不可用,则看云上是否有a项目，有则直接使用,若没有则在云上创建a-1, a-2类似项目
+func (cprvd *SCloudprovider) SyncProject(ctx context.Context, userCred mcclient.TokenCredential, id string) (string, error) {
+	lockman.LockRawObject(ctx, ExternalProjectManager.Keyword(), cprvd.Id)
+	defer lockman.ReleaseRawObject(ctx, ExternalProjectManager.Keyword(), cprvd.Id)
 
 	provider, err := cprvd.GetProvider(ctx)
 	if err != nil {
@@ -2028,7 +1998,7 @@ func (cprvd *SCloudprovider) SyncManagerProject(ctx context.Context, userCred mc
 		return "", errors.Wrapf(err, "CreateIProject(%s)", projectName)
 	}
 
-	extProj, err = ExternalProjectManager.newFromCloudProject(ctx, userCred, account, project, iProject)
+	extProj, err = cprvd.newFromCloudProject(ctx, userCred, project, iProject)
 	if err != nil {
 		return "", errors.Wrap(err, "newFromCloudProject")
 	}

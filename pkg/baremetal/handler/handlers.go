@@ -16,22 +16,27 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
 
+	baremetalapi "yunion.io/x/onecloud/pkg/apis/baremetal"
 	"yunion.io/x/onecloud/pkg/appsrv"
 	"yunion.io/x/onecloud/pkg/baremetal"
 	"yunion.io/x/onecloud/pkg/baremetal/options"
 	baremetalstatus "yunion.io/x/onecloud/pkg/baremetal/status"
 	"yunion.io/x/onecloud/pkg/baremetal/tasks"
 	baremetaltypes "yunion.io/x/onecloud/pkg/baremetal/types"
+	"yunion.io/x/onecloud/pkg/baremetal/utils/ipmitool"
 	app_common "yunion.io/x/onecloud/pkg/cloudcommon/app"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
+	"yunion.io/x/onecloud/pkg/util/redfish"
 )
 
 var registerWorkMan *appsrv.SWorkerManager
@@ -77,6 +82,7 @@ func initBaremetalsHandler(app *appsrv.Application) {
 	AddHandler(app, "POST", bmActionPrefix("ipmi-probe"), bmObjMiddleware(handleBaremetalIpmiProbe))
 	AddHandler(app, "POST", bmActionPrefix("cdrom"), bmObjMiddleware(handleBaremetalCdromTask))
 	AddHandler(app, "POST", bmActionPrefix("jnlp"), bmObjMiddleware(handleBaremetalJnlpTask))
+	AddHandler(app, "POST", "/baremetals/validate-ipmi", handleBaremetalValidateIPMI())
 
 	// server actions handler
 	AddHandler(app, "POST", srvActionPrefix("create"), srvClassMiddleware(handleServerCreate))
@@ -109,7 +115,7 @@ func handleBaremetalNotify(ctx *Context, bm *baremetal.SBaremetalInstance) {
 	task := bm.GetTask()
 	if task == nil {
 		task = tasks.NewBaremetalServerPrepareTask(bm)
-		bm.SyncStatus(baremetalstatus.PREPARE, "")
+		bm.SyncStatus(ctx, baremetalstatus.PREPARE, "")
 	}
 	log.Infof("Get notify from pxe rom os, start exec task: %s", task.GetName())
 	task.SSHExecute(remoteAddr, key, nil)
@@ -157,7 +163,7 @@ func handleBaremetalResetBMC(ctx *Context, bm *baremetal.SBaremetalInstance) {
 }
 
 func handleBaremetalIpmiProbe(ctx *Context, bm *baremetal.SBaremetalInstance) {
-	bm.StartBaremetalIpmiProbeTask(ctx.UserCred(), ctx.TaskId(), ctx.Data())
+	bm.StartBaremetalIpmiProbeTask(ctx, ctx.UserCred(), ctx.TaskId(), ctx.Data())
 	ctx.ResponseOk()
 }
 
@@ -177,8 +183,57 @@ func handleBaremetalJnlpTask(ctx *Context, bm *baremetal.SBaremetalInstance) {
 	ctx.ResponseJson(result)
 }
 
+func handleBaremetalValidateIPMI() appsrv.FilterHandler {
+	return auth.Authenticate(func(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+		_, _, body := appsrv.FetchEnv(ctx, w, r)
+		if body == nil {
+			httperrors.BadRequestError(ctx, w, "body is empty")
+			return
+		}
+		validate := func() (*baremetalapi.ValidateIPMIResponse, error) {
+			input := new(baremetalapi.ValidateIPMIRequest)
+			if err := body.Unmarshal(input); err != nil {
+				return nil, errors.Wrapf(err, "unmarshal validate ipmi request: %s", body)
+			}
+
+			var endpoint = "https://" + input.Ip
+			if strings.Contains(input.Ip, ":") {
+				endpoint = fmt.Sprintf("https://[%s]", input.Ip)
+			}
+			redfishCli := redfish.NewRedfishDriver(ctx, endpoint, input.Username, input.Password, false)
+			resp := &baremetalapi.ValidateIPMIResponse{}
+			if redfishCli == nil {
+				resp.IsRedfishSupported = false
+				// use ipmitool to validate
+				tool := ipmitool.NewLanPlusIPMI(input.Ip, input.Username, input.Password)
+				info, err := ipmitool.GetSysInfo(tool)
+				if err != nil {
+					return nil, errors.Wrap(err, "GetSysInfo by ipmitool")
+				}
+				resp.IPMISystemInfo = info
+			} else {
+				path, info, err := redfishCli.GetSystemInfo(ctx)
+				if err != nil {
+					return nil, errors.Wrapf(err, "get system info")
+				}
+				resp.RedfishSystemInfo = &baremetalapi.RedfishSystemInfo{
+					Path: path,
+					Info: info,
+				}
+			}
+			return resp, nil
+		}
+		resp, err := validate()
+		if err != nil {
+			httperrors.GeneralServerError(ctx, w, err)
+			return
+		}
+		appsrv.SendStruct(w, resp)
+	})
+}
+
 func handleServerCreate(ctx *Context, bm *baremetal.SBaremetalInstance) {
-	err := bm.StartServerCreateTask(ctx.UserCred(), ctx.TaskId(), ctx.Data())
+	err := bm.StartServerCreateTask(ctx, ctx.UserCred(), ctx.TaskId(), ctx.Data())
 	if err != nil {
 		ctx.ResponseError(httperrors.NewGeneralError(err))
 		return
@@ -238,7 +293,7 @@ func handleServerStatus(ctx *Context, bm *baremetal.SBaremetalInstance, _ bareme
 }
 
 func handleBaremetalRegister(ctx *Context, input *baremetal.BmRegisterInput) {
-	ctx.DelayProcess(func(data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
+	ctx.DelayProcess(func(_ context.Context, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 		baremetal.GetBaremetalManager().RegisterBaremetal(ctx, ctx.userCred, input)
 		return nil, nil
 	}, nil)

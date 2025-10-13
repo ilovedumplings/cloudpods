@@ -136,7 +136,7 @@ func (self *SProxmoxGuestDriver) GetAttachDiskStatus() ([]string, error) {
 	return []string{api.VM_READY}, nil
 }
 
-func (self *SProxmoxGuestDriver) GetChangeConfigStatus(guest *models.SGuest) ([]string, error) {
+func (self *SProxmoxGuestDriver) GetChangeInstanceTypeStatus() ([]string, error) {
 	return []string{api.VM_READY, api.VM_RUNNING}, nil
 }
 
@@ -153,8 +153,7 @@ func (self *SProxmoxGuestDriver) ValidateCreateEip(ctx context.Context, userCred
 }
 
 func (self *SProxmoxGuestDriver) ValidateCreateData(ctx context.Context, userCred mcclient.TokenCredential, input *api.ServerCreateInput) (*api.ServerCreateInput, error) {
-	driver := models.GetDriver(input.Hypervisor)
-	if len(input.UserData) > 0 && driver != nil && driver.IsNeedInjectPasswordByCloudInit() {
+	if len(input.UserData) > 0 {
 		_, err := cloudinit.ParseUserData(input.UserData)
 		if err != nil {
 			return nil, err

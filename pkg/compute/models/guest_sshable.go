@@ -38,6 +38,7 @@ import (
 	ansible_modules "yunion.io/x/onecloud/pkg/mcclient/modules/ansible"
 	cloudproxy_module "yunion.io/x/onecloud/pkg/mcclient/modules/cloudproxy"
 	"yunion.io/x/onecloud/pkg/util/ansible"
+	"yunion.io/x/onecloud/pkg/util/logclient"
 	ssh_util "yunion.io/x/onecloud/pkg/util/ssh"
 )
 
@@ -109,6 +110,7 @@ func (guest *SGuest) GetDetailsSshable(
 		}
 	}
 
+	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_TRYSSHABLE, nil, userCred, true)
 	return tryData.outputJSON(), nil
 }
 
@@ -350,7 +352,8 @@ func (guest *SGuest) sshableTry(
 		return true
 	}
 
-	ctx, _ = context.WithTimeout(ctx, 7*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 7*time.Second)
+	defer cancel()
 	conf := ssh_util.ClientConfig{
 		Username:   tryData.User,
 		Host:       methodData.Host,
@@ -498,6 +501,7 @@ func (guest *SGuest) PerformMakeSshable(
 		return output, httperrors.NewGeneralError(err)
 	}
 
+	logclient.AddActionLogWithContext(ctx, guest, logclient.ACT_MAKESSHABLE, nil, userCred, true)
 	output = compute_api.GuestMakeSshableOutput{
 		AnsiblePlaybookId: pbModel.Id,
 	}

@@ -15,11 +15,19 @@
 package tasks
 
 import (
+	"context"
+
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 
 	"yunion.io/x/onecloud/pkg/mcclient"
 	"yunion.io/x/onecloud/pkg/util/ssh"
+)
+
+var _ IServerBaseDeployTask = new(SBaremetalServerDestroyTask)
+
+const (
+	BAREMETAL_SERVER_DESTROY_TASK = "BaremetalServerDestroyTask"
 )
 
 type SBaremetalServerDestroyTask struct {
@@ -41,14 +49,14 @@ func NewBaremetalServerDestroyTask(
 }
 
 func (self *SBaremetalServerDestroyTask) GetName() string {
-	return "BaremetalServerDestroyTask"
+	return BAREMETAL_SERVER_DESTROY_TASK
 }
 
 func (self *SBaremetalServerDestroyTask) RemoveEFIOSEntry() bool {
 	return true
 }
 
-func (self *SBaremetalServerDestroyTask) DoDeploys(term *ssh.Client) (jsonutils.JSONObject, error) {
+func (self *SBaremetalServerDestroyTask) DoDeploys(ctx context.Context, term *ssh.Client) (jsonutils.JSONObject, error) {
 	if err := self.Baremetal.GetServer().DoEraseDisk(term); err != nil {
 		log.Errorf("Delete server do erase disk: %v", err)
 	}

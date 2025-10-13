@@ -125,7 +125,12 @@ func (self *SQcloudRegionDriver) RequestCreateLoadbalancerListener(ctx context.C
 			return nil, errors.Wrapf(err, "GetICloudLoadbalancerBackendGroup")
 		}
 		for i := range backends {
-			_, err := iLbbg.AddBackendServer(backends[i].ExternalId, backends[i].Port, backends[i].Weight)
+			opts := &cloudprovider.SLoadbalancerBackend{
+				Weight:     backends[i].Weight,
+				Port:       backends[i].Port,
+				ExternalId: backends[i].ExternalId,
+			}
+			_, err := iLbbg.AddBackendServer(opts)
 			if err != nil {
 				return nil, errors.Wrapf(err, "AddBackendServer")
 			}
@@ -590,6 +595,6 @@ func (self *SQcloudRegionDriver) ValidateUpdateSecurityGroupRuleInput(ctx contex
 
 func (self *SQcloudRegionDriver) GetSecurityGroupFilter(vpc *models.SVpc) (func(q *sqlchemy.SQuery) *sqlchemy.SQuery, error) {
 	return func(q *sqlchemy.SQuery) *sqlchemy.SQuery {
-		return q.Equals("cloudregion_id", vpc.CloudregionId)
+		return q.Equals("cloudregion_id", vpc.CloudregionId).Equals("manager_id", vpc.ManagerId)
 	}, nil
 }

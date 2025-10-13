@@ -276,7 +276,6 @@ func (ident *SIdentityProvider) MarkConnected(ctx context.Context, userCred mccl
 		}
 	}
 	if ident.Status != api.IdentityDriverStatusConnected {
-		logclient.AddSimpleActionLog(ident, logclient.ACT_ENABLE, nil, userCred, true)
 		return ident.SetStatus(ctx, userCred, api.IdentityDriverStatusConnected, "")
 	}
 	return nil
@@ -290,7 +289,6 @@ func (ident *SIdentityProvider) MarkDisconnected(ctx context.Context, userCred m
 	if err != nil {
 		return errors.Wrap(err, "UpdateWithLock")
 	}
-	logclient.AddSimpleActionLog(ident, logclient.ACT_DISABLE, reason.Error(), userCred, false)
 	if ident.Status != api.IdentityDriverStatusDisconnected {
 		return ident.SetStatus(ctx, userCred, api.IdentityDriverStatusDisconnected, reason.Error())
 	}
@@ -585,10 +583,39 @@ func (manager *SIdentityProviderManager) FetchCustomizeColumns(
 
 	stdRows := manager.SEnabledStatusStandaloneResourceBaseManager.FetchCustomizeColumns(ctx, userCred, query, objs, fields, isList)
 	domainRows := manager.SDomainizedResourceBaseManager.FetchCustomizeColumns(ctx, userCred, query, objs, fields, isList)
+	targetDomainIds := make([]string, len(objs))
+	idpIds := make([]string, len(objs))
 	for i := range rows {
 		rows[i].EnabledStatusStandaloneResourceDetails = stdRows[i]
 		rows[i].DomainizedResourceInfo = domainRows[i]
+		idp := objs[i].(*SIdentityProvider)
+		rows[i].SyncIntervalSeconds = idp.getSyncIntervalSeconds()
+		targetDomainIds[i] = idp.TargetDomainId
+		idpIds[i] = idp.Id
 		rows[i] = objs[i].(*SIdentityProvider).getMoreDetails(rows[i])
+	}
+	domainMap, err := db.FetchIdNameMap2(DomainManager, targetDomainIds)
+	if err != nil {
+		log.Errorf("FetchIdNameMap2 error: %s", err)
+	}
+
+	opts := []struct {
+		DomainId string
+		Value    string
+	}{}
+
+	err = WhitelistedConfigManager.Query("domain_id", "value").In("domain_id", idpIds).Equals("option", "url").All(&opts)
+	if err != nil {
+		log.Errorf("FetchModelObjects error: %s", err)
+	}
+	optMap := make(map[string]string)
+	for i := range opts {
+		optMap[opts[i].DomainId] = strings.Trim(opts[i].Value, `"`)
+	}
+
+	for i := range rows {
+		rows[i].TargetDomain = domainMap[targetDomainIds[i]]
+		rows[i].URL = optMap[idpIds[i]]
 	}
 
 	return rows
@@ -601,13 +628,6 @@ func (self *SIdentityProvider) getMoreDetails(out api.IdentityProviderDetails) a
 	out.DomainCount, _ = self.GetDomainCount()
 	out.ProjectCount, _ = self.GetProjectCount()
 	out.GroupCount, _ = self.GetGroupCount()
-	out.SyncIntervalSeconds = self.getSyncIntervalSeconds()
-	if len(self.TargetDomainId) > 0 {
-		domain, _ := DomainManager.FetchDomainById(self.TargetDomainId)
-		if domain != nil {
-			out.TargetDomain = domain.Name
-		}
-	}
 	return out
 }
 
@@ -893,7 +913,7 @@ func (self *SIdentityProvider) Purge(ctx context.Context, userCred mcclient.Toke
 				return errors.Wrap(err, "domains[i].UnlinkIdp")
 			}
 		} else {
-			err = domains[i].ValidateDeleteCondition(ctx, nil)
+			err = domains[i].validateDeleteConditionInternal(ctx, nil, true)
 			if err != nil {
 				db.OpsLog.LogEvent(&domains[i], db.ACT_DELETE_FAIL, err, userCred)
 				return errors.Wrap(err, "domain.ValidateDeleteCondition")
@@ -1051,6 +1071,7 @@ func (self *SIdentityProvider) SyncOrCreateUser(ctx context.Context, extId strin
 		return nil, errors.Wrap(err, "db.NewModelObject")
 	}
 	user := userObj.(*SUser)
+	user.SetModelManager(UserManager, user)
 	q := UserManager.RawQuery().Equals("id", userId)
 	err = q.First(user)
 	if err != nil && err != sql.ErrNoRows {
@@ -1083,9 +1104,6 @@ func (self *SIdentityProvider) SyncOrCreateUser(ctx context.Context, extId strin
 			return nil, errors.Wrap(err, "Update")
 		}
 	} else {
-		if syncUserInfo != nil {
-			syncUserInfo(user)
-		}
 		if enableDefault {
 			user.Enabled = tristate.True
 		} else {
@@ -1108,6 +1126,9 @@ func (self *SIdentityProvider) SyncOrCreateUser(ctx context.Context, extId strin
 		}()
 		if err != nil {
 			return nil, errors.Wrap(err, "Insert")
+		}
+		if syncUserInfo != nil {
+			syncUserInfo(user)
 		}
 	}
 	return user, nil

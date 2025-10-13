@@ -21,6 +21,7 @@ import (
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/util/printutils"
+	"yunion.io/x/pkg/util/shellutils"
 	"yunion.io/x/pkg/utils"
 
 	"yunion.io/x/onecloud/pkg/mcclient"
@@ -544,6 +545,81 @@ func (cmd ResourceCmd) Update(args IUpdateOpt) {
 	cmd.UpdateWithKeyword("update", args)
 }
 
+type EditType string
+
+const (
+	EditTypeText EditType = "text"
+	EditTypeYaml EditType = "yaml"
+	EditTypeJson EditType = "json"
+)
+
+type IEditOpt interface {
+	IGetOpt
+	EditType() EditType
+	EditFields() []string
+}
+
+func (cmd ResourceCmd) Edit(args IEditOpt) {
+	man := cmd.manager
+	callback := func(s *mcclient.ClientSession, args IEditOpt) error {
+		params, err := args.Params()
+		if err != nil {
+			return err
+		}
+		obj, err := man.(modulebase.Manager).Get(s, args.GetId(), params)
+		if err != nil {
+			return err
+		}
+
+		format := args.EditType()
+		fields := args.EditFields()
+		var editText string
+
+		switch format {
+		case EditTypeText:
+			editText, _ = obj.GetString(fields...)
+		default:
+			editJson, _ := obj.Get(fields...)
+			if editJson == nil {
+				editJson = jsonutils.NewDict()
+			}
+			if format == EditTypeYaml {
+				editText = editJson.YAMLString()
+			} else if format == EditTypeJson {
+				editText = editJson.PrettyString()
+			}
+		}
+		editText, err = shellutils.Edit(editText)
+		if err != nil {
+			return err
+		}
+		updateParams := jsonutils.NewDict()
+		switch format {
+		case EditTypeText:
+			updateParams.Add(jsonutils.NewString(editText), fields...)
+		case EditTypeYaml:
+			yamlObj, err := jsonutils.ParseYAML(editText)
+			if err != nil {
+				return err
+			}
+			updateParams.Add(yamlObj, fields...)
+		case EditTypeJson:
+			jsonObj, err := jsonutils.ParseString(editText)
+			if err != nil {
+				return err
+			}
+			updateParams.Add(jsonObj, fields...)
+		}
+		updateResult, err := man.(modulebase.Manager).Update(s, args.GetId(), updateParams)
+		if err != nil {
+			return err
+		}
+		PrintObject(updateResult)
+		return nil
+	}
+	cmd.Run("edit", args, callback)
+}
+
 type IMetadataOpt interface {
 	IIdOpt
 	IOpt
@@ -667,15 +743,15 @@ func (cmd JointCmd) List(args IJointListOpt) {
 	cmd.RunWithDesc("list", fmt.Sprintf("list %s %s pairs", man.MasterManager().KeyString(), man.SlaveManager().KeyString()), args, callback)
 }
 
-type IJointShowOpt interface {
+type IJointOpt interface {
 	IOpt
 	GetMasterId() string
 	GetSlaveId() string
 }
 
-func (cmd JointCmd) Show(args IJointShowOpt) {
+func (cmd JointCmd) Show(args IJointOpt) {
 	man := cmd.manager.(modulebase.JointManager)
-	callback := func(s *mcclient.ClientSession, args IJointShowOpt) error {
+	callback := func(s *mcclient.ClientSession, args IJointOpt) error {
 		params, err := args.Params()
 		if err != nil {
 			return err
@@ -688,4 +764,55 @@ func (cmd JointCmd) Show(args IJointShowOpt) {
 		return nil
 	}
 	cmd.Run("show", args, callback)
+}
+
+func (cmd JointCmd) Attach(args IJointOpt) {
+	man := cmd.manager.(modulebase.JointManager)
+	callback := func(s *mcclient.ClientSession, args IJointOpt) error {
+		params, err := args.Params()
+		if err != nil {
+			return err
+		}
+		result, err := man.Attach(s, args.GetMasterId(), args.GetSlaveId(), params)
+		if err != nil {
+			return err
+		}
+		PrintObject(result)
+		return nil
+	}
+	cmd.Run("attach", args, callback)
+}
+
+func (cmd JointCmd) Detach(args IJointOpt) {
+	man := cmd.manager.(modulebase.JointManager)
+	callback := func(s *mcclient.ClientSession, args IJointOpt) error {
+		params, err := args.Params()
+		if err != nil {
+			return err
+		}
+		result, err := man.Detach(s, args.GetMasterId(), args.GetSlaveId(), params)
+		if err != nil {
+			return err
+		}
+		PrintObject(result)
+		return nil
+	}
+	cmd.Run("detach", args, callback)
+}
+
+func (cmd JointCmd) Update(args IJointOpt) {
+	man := cmd.manager.(modulebase.JointManager)
+	callback := func(s *mcclient.ClientSession, args IJointOpt) error {
+		params, err := args.Params()
+		if err != nil {
+			return err
+		}
+		result, err := man.Update(s, args.GetMasterId(), args.GetSlaveId(), nil, params)
+		if err != nil {
+			return err
+		}
+		PrintObject(result)
+		return nil
+	}
+	cmd.Run("update", args, callback)
 }

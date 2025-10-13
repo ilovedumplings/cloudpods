@@ -15,20 +15,24 @@
 package compute
 
 import (
+	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/pkg/errors"
 
 	"yunion.io/x/onecloud/pkg/apis"
 	computeapi "yunion.io/x/onecloud/pkg/apis/compute"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/compute"
 	"yunion.io/x/onecloud/pkg/mcclient/options"
 )
 
 type ContainerListOptions struct {
 	options.BaseListOptions
 	GuestId string `json:"guest_id" help:"guest(pod) id or name"`
+	HostId  string `json:"host_id" help:"host id or name"`
 }
 
 func (o *ContainerListOptions) Params() (jsonutils.JSONObject, error) {
@@ -45,11 +49,13 @@ type ContainerDeleteOptions struct {
 
 type ContainerCreateCommonOptions struct {
 	IMAGE             string   `help:"Image of container" json:"image"`
+	ImageCredentialId string   `help:"Image credential id" json:"image_credential_id"`
 	Command           []string `help:"Command to execute (i.e., entrypoint for docker)" json:"command"`
 	Args              []string `help:"Args for the Command (i.e. command for docker)" json:"args"`
 	WorkingDir        string   `help:"Current working directory of the command" json:"working_dir"`
 	Env               []string `help:"List of environment variable to set in the container and the format is: <key>=<value>"`
-	VolumeMount       []string `help:"Volume mount of the container and the format is: name=<val>,mount=<container_path>,readonly=<true_or_false>,disk_index=<disk_number>,disk_id=<disk_id>"`
+	RootFs            string   `help:"Root filesystem of the container, e.g.: disk_index=<disk_number>,disk_id=<disk_id>"`
+	VolumeMount       []string `help:"Volume mount of the container and the format is: name=<val>,mount=<container_path>,readonly=<true_or_false>,case_insensitive_paths=p1,p2,disk_index=<disk_number>,disk_id=<disk_id>"`
 	Device            []string `help:"Host device: <host_path>:<container_path>:<permissions>, e.g.: /dev/snd:/dev/snd:rwm"`
 	Privileged        bool     `help:"Privileged mode"`
 	Caps              string   `help:"Container capabilities, e.g.: SETPCAP,AUDIT_WRITE,SYS_CHROOT,CHOWN,DAC_OVERRIDE,FOWNER,SETGID,SETUID,SYSLOG,SYS_ADMIN,WAKE_ALARM,SYS_PTRACE,BLOCK_SUSPEND,MKNOD,KILL,SYS_RESOURCE,NET_RAW,NET_ADMIN,NET_BIND_SERVICE,SYS_NICE"`
@@ -58,12 +64,18 @@ type ContainerCreateCommonOptions struct {
 	PostStartExec     string   `help:"Post started execution command"`
 	CgroupDeviceAllow []string `help:"Cgroup devices.allow, e.g.: 'c 13:* rwm'"`
 	SimulateCpu       bool     `help:"Simulating /sys/devices/system/cpu files"`
+	ShmSizeMb         int      `help:"Shm size MB"`
+	Uid               int64    `help:"UID of container" default:"0"`
+	Gid               int64    `help:"GID of container" default:"0"`
+	DisableNoNewPrivs bool     `help:"Disable no_new_privs flag of the container"`
+	Apparmor          string   `help:"Apparmor profile for container"`
 }
 
 func (o ContainerCreateCommonOptions) getCreateSpec() (*computeapi.ContainerSpec, error) {
 	req := &computeapi.ContainerSpec{
 		ContainerSpec: apis.ContainerSpec{
 			Image:              o.IMAGE,
+			ImageCredentialId:  o.ImageCredentialId,
 			Command:            o.Command,
 			Args:               o.Args,
 			WorkingDir:         o.WorkingDir,
@@ -72,7 +84,24 @@ func (o ContainerCreateCommonOptions) getCreateSpec() (*computeapi.ContainerSpec
 			Capabilities:       &apis.ContainerCapability{},
 			CgroupDevicesAllow: o.CgroupDeviceAllow,
 			SimulateCpu:        o.SimulateCpu,
+			DisableNoNewPrivs:  o.DisableNoNewPrivs,
+			SecurityContext: &apis.ContainerSecurityContext{
+				RunAsUser:  nil,
+				RunAsGroup: nil,
+			},
 		},
+	}
+	if o.ShmSizeMb > 0 {
+		req.ContainerSpec.ShmSizeMB = o.ShmSizeMb
+	}
+	if o.Uid > 0 {
+		req.ContainerSpec.SecurityContext.RunAsUser = &o.Uid
+	}
+	if o.Gid > 0 {
+		req.ContainerSpec.SecurityContext.RunAsGroup = &o.Gid
+	}
+	if o.Apparmor != "" {
+		req.ContainerSpec.SecurityContext.ApparmorProfile = o.Apparmor
 	}
 	if len(o.PostStartExec) != 0 {
 		req.Lifecyle = &apis.ContainerLifecyle{
@@ -96,6 +125,13 @@ func (o ContainerCreateCommonOptions) getCreateSpec() (*computeapi.ContainerSpec
 			return nil, errors.Wrapf(err, "parseContainerEnv %s", env)
 		}
 		req.Envs = append(req.Envs, e)
+	}
+	if len(o.RootFs) != 0 {
+		rootFs, err := parseContainerRootFs(o.RootFs)
+		if err != nil {
+			return nil, errors.Wrapf(err, "parseContainerRootFs %s", o.RootFs)
+		}
+		req.RootFs = rootFs
 	}
 	for _, vmStr := range o.VolumeMount {
 		vm, err := parseContainerVolumeMount(vmStr)
@@ -146,6 +182,32 @@ func parseContainerEnv(env string) (*apis.ContainerKeyValue, error) {
 	}, nil
 }
 
+func parseContainerRootFs(rootFs string) (*apis.ContainerRootfs, error) {
+	out := &apis.ContainerRootfs{
+		Type: apis.CONTAINER_VOLUME_MOUNT_TYPE_DISK,
+		Disk: &apis.ContainerVolumeMountDisk{},
+	}
+	for _, seg := range strings.Split(rootFs, ",") {
+		info := strings.Split(seg, "=")
+		if len(info) != 2 {
+			return nil, errors.Errorf("invalid option %s", seg)
+		}
+		key := info[0]
+		val := info[1]
+		switch key {
+		case "disk_index":
+			index, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, errors.Wrapf(err, "wrong disk_index %s", val)
+			}
+			out.Disk.Index = &index
+		case "disk_id":
+			out.Disk.Id = val
+		}
+	}
+	return out, nil
+}
+
 func parseContainerVolumeMount(vmStr string) (*apis.ContainerVolumeMount, error) {
 	vm := &apis.ContainerVolumeMount{}
 	for _, seg := range strings.Split(vmStr, ",") {
@@ -160,6 +222,20 @@ func parseContainerVolumeMount(vmStr string) (*apis.ContainerVolumeMount, error)
 			if strings.ToLower(val) == "true" {
 				vm.ReadOnly = true
 			}
+		case "fs_user":
+			uId, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, errors.Wrapf(err, "invalid fs_user %s", val)
+			}
+			uId64 := int64(uId)
+			vm.FsUser = &uId64
+		case "fs_group":
+			gId, err := strconv.Atoi(val)
+			if err != nil {
+				return nil, errors.Wrapf(err, "invalid fs_group %s", val)
+			}
+			gId64 := int64(gId)
+			vm.FsGroup = &gId64
 		case "mount_path":
 			vm.MountPath = val
 		case "host_path":
@@ -201,6 +277,8 @@ func parseContainerVolumeMount(vmStr string) (*apis.ContainerVolumeMount, error)
 				vm.Disk = &apis.ContainerVolumeMountDisk{}
 			}
 			vm.Disk.StorageSizeFile = val
+		case "case_insensitive_paths", "casefold_paths":
+			vm.Disk.CaseInsensitivePaths = strings.Split(val, ",")
 		case "overlay":
 			if vm.Disk == nil {
 				vm.Disk = &apis.ContainerVolumeMountDisk{}
@@ -216,6 +294,20 @@ func parseContainerVolumeMount(vmStr string) (*apis.ContainerVolumeMount, error)
 				vm.Disk.Overlay = &apis.ContainerVolumeMountDiskOverlay{
 					UseDiskImage: true,
 				}
+			}
+		case "text_file":
+			content, err := os.ReadFile(val)
+			if err != nil {
+				return nil, errors.Wrapf(err, "read file %s", val)
+			}
+			vm.Type = apis.CONTAINER_VOLUME_MOUNT_TYPE_TEXT
+			vm.Text = &apis.ContainerVolumeMountText{
+				Content: string(content),
+			}
+		case "cephfs":
+			vm.Type = apis.CONTAINER_VOLUME_MOUNT_TYPE_CEPHF_FS
+			vm.CephFS = &apis.ContainerVolumeMountCephFS{
+				Id: val,
 			}
 		}
 	}
@@ -236,7 +328,8 @@ func (o *ContainerIdsOptions) Params() (jsonutils.JSONObject, error) {
 
 type ContainerStopOptions struct {
 	ContainerIdsOptions
-	Timeout int `help:"Stopping timeout" json:"timeout"`
+	Timeout int  `help:"Stopping timeout" json:"timeout"`
+	Force   bool `help:"Force stop container" json:"force"`
 }
 
 func (o *ContainerStopOptions) Params() (jsonutils.JSONObject, error) {
@@ -249,18 +342,22 @@ type ContainerStartOptions struct {
 
 type ContainerSaveVolumeMountImage struct {
 	options.ResourceIdOptions
-	IMAGENAME    string `help:"Image name"`
-	INDEX        int    `help:"Index of volume mount"`
-	GenerateName string `help:"Generate image name automatically"`
-	Notes        string `help:"Extra notes of the image"`
+	IMAGENAME         string   `help:"Image name"`
+	INDEX             int      `help:"Index of volume mount"`
+	GenerateName      string   `help:"Generate image name automatically"`
+	Notes             string   `help:"Extra notes of the image"`
+	UsedByPostOverlay bool     `help:"Used by voluem mount post-overlay"`
+	Dirs              []string `help:"Internal directories"`
 }
 
 func (o ContainerSaveVolumeMountImage) Params() (jsonutils.JSONObject, error) {
 	return jsonutils.Marshal(&computeapi.ContainerSaveVolumeMountToImageInput{
-		Name:         o.IMAGENAME,
-		GenerateName: o.GenerateName,
-		Notes:        o.Notes,
-		Index:        o.INDEX,
+		Name:              o.IMAGENAME,
+		GenerateName:      o.GenerateName,
+		Notes:             o.Notes,
+		Index:             o.INDEX,
+		Dirs:              o.Dirs,
+		UsedByPostOverlay: o.UsedByPostOverlay,
 	}), nil
 }
 
@@ -268,16 +365,197 @@ type ContainerExecOptions struct {
 	ServerIdOptions
 	// Tty     bool `help:"Using tty" short-token:"t"`
 	COMMAND string
+	Args    []string
 }
 
-func (o *ContainerExecOptions) ToAPIInput() *computeapi.ContainerExecInput {
-	return &computeapi.ContainerExecInput{
-		Command: strings.Split(o.COMMAND, " "),
-		//Tty:     o.Tty,
-		Tty: true,
+func (o *ContainerExecOptions) ToAPIInput() *compute.ContainerExecInput {
+	cmd := []string{o.COMMAND}
+	cmd = append(cmd, o.Args...)
+	return &compute.ContainerExecInput{
+		Command: cmd,
+		Tty:     true,
+		Stdin:   os.Stdin,
+		Stdout:  os.Stdout,
+		Stderr:  os.Stderr,
 	}
 }
 
 func (o *ContainerExecOptions) Params() (jsonutils.JSONObject, error) {
 	return jsonutils.Marshal(o.ToAPIInput()), nil
+}
+
+type ContainerSetResourcesLimitOptions struct {
+	ContainerIdsOptions
+	DisableLimitCheck bool    `help:"disable limit check"`
+	CpuCfsQuota       float64 `help:"cpu cfs quota. e.g.:0.5 equals 0.5*100000"`
+	//MemoryLimitMb int64    `help:"memory limit MB"`
+	PidsMax     int      `help:"pids max"`
+	DeviceAllow []string `help:"devices allow"`
+}
+
+func (o *ContainerSetResourcesLimitOptions) Params() (jsonutils.JSONObject, error) {
+	limit := &computeapi.ContainerResourcesSetInput{}
+	if o.CpuCfsQuota > 0 {
+		limit.CpuCfsQuota = &o.CpuCfsQuota
+	}
+	//if o.MemoryLimitMb > 0 {
+	//	limit.MemoryLimitMB = &o.MemoryLimitMb
+	//}
+	if o.PidsMax > 0 {
+		limit.PidsMax = &o.PidsMax
+	}
+	if len(o.DeviceAllow) > 0 {
+		limit.DevicesAllow = o.DeviceAllow
+	}
+	limit.DisableLimitCheck = o.DisableLimitCheck
+
+	return jsonutils.Marshal(limit), nil
+}
+
+type ContainerExecSyncOptions struct {
+	ServerIdOptions
+	COMMAND string
+	Args    []string
+	Timeout int64
+}
+
+func (o *ContainerExecSyncOptions) Params() (jsonutils.JSONObject, error) {
+	cmd := []string{o.COMMAND}
+	cmd = append(cmd, o.Args...)
+	return jsonutils.Marshal(&computeapi.ContainerExecSyncInput{
+		Command: cmd,
+		Timeout: o.Timeout,
+	}), nil
+}
+
+type ContainerLogOptions struct {
+	ServerIdOptions
+	Since      string `help:"Only return logs newer than a relative duration like 5s, 2m, or 3h" json:"since"`
+	Follow     bool   `help:"Follow log output" short-token:"f" json:"follow"`
+	Tail       int64  `help:"Lines of recent log file to display" json:"tail"`
+	Timestamps bool   `help:"Show timestamps on each line in the log output" json:"timestamps"`
+	LimitBytes int64  `help:"Maximum amount of bytes that can be used." json:"limitBytes"`
+}
+
+func (o *ContainerLogOptions) Params() (jsonutils.JSONObject, error) {
+	input, err := o.ToAPIInput()
+	if err != nil {
+		return nil, err
+	}
+	return jsonutils.Marshal(input), nil
+}
+
+func (o *ContainerLogOptions) ToAPIInput() (*computeapi.PodLogOptions, error) {
+	opt := &computeapi.PodLogOptions{
+		Follow:     o.Follow,
+		Timestamps: o.Timestamps,
+	}
+	if o.LimitBytes > 0 {
+		opt.LimitBytes = &o.LimitBytes
+	}
+	if o.Tail > 0 {
+		opt.TailLines = &o.Tail
+	}
+	if len(o.Since) > 0 {
+		dur, err := time.ParseDuration(o.Since)
+		if err != nil {
+			return nil, errors.Wrapf(err, "parse duration %s", o.Since)
+		}
+		sec := int64(dur.Round(time.Second).Seconds())
+		opt.SinceSeconds = &sec
+	}
+	return opt, nil
+}
+
+type ContainerCommitOptions struct {
+	ServerIdOptions
+	RegistryId               string `help:"Registry ID from kubeserver"`
+	ImageName                string `help:"Image name"`
+	Tag                      string `help:"Tag"`
+	ExternalRegistryUrl      string `help:"External registry URL, e.g.: registry.cn-beijing.aliyuncs.com/yunionio"`
+	ExternalRegistryUsername string `help:"External registry username"`
+	ExternalRegistryPassword string `help:"External registry password"`
+}
+
+func (o *ContainerCommitOptions) Params() (jsonutils.JSONObject, error) {
+	input := &computeapi.ContainerCommitInput{
+		RegistryId: o.RegistryId,
+		ImageName:  o.ImageName,
+		Tag:        o.Tag,
+		ExternalRegistry: &computeapi.ContainerCommitExternalRegistry{
+			Auth: &apis.ContainerPullImageAuthConfig{},
+		},
+	}
+	if o.ExternalRegistryUrl != "" {
+		input.ExternalRegistry.Url = o.ExternalRegistryUrl
+	}
+	if o.ExternalRegistryUsername != "" {
+		input.ExternalRegistry.Auth.Username = o.ExternalRegistryUsername
+	}
+	if o.ExternalRegistryPassword != "" {
+		input.ExternalRegistry.Auth.Password = o.ExternalRegistryPassword
+	}
+	return jsonutils.Marshal(input), nil
+}
+
+type ContainerAddVolumeMountPostOverlayOptions struct {
+	ServerIdOptions
+	INDEX     int      `help:"INDEX of volume mount"`
+	MountDesc []string `help:"Mount description, <host_lower_dir>:<container_target_dir>" short-token:"m"`
+	Image     []string `help:"Image name or id"`
+}
+
+func (o *ContainerAddVolumeMountPostOverlayOptions) Params() (jsonutils.JSONObject, error) {
+	input := &computeapi.ContainerVolumeMountAddPostOverlayInput{
+		Index:       o.INDEX,
+		PostOverlay: make([]*apis.ContainerVolumeMountDiskPostOverlay, 0),
+	}
+	for _, md := range o.MountDesc {
+		segs := strings.Split(md, ":")
+		if len(segs) != 2 {
+			return nil, errors.Errorf("invalid mount description: %s", md)
+		}
+		lowerDir := segs[0]
+		containerTargetDir := segs[1]
+		input.PostOverlay = append(input.PostOverlay, &apis.ContainerVolumeMountDiskPostOverlay{
+			HostLowerDir:       []string{lowerDir},
+			ContainerTargetDir: containerTargetDir,
+		})
+	}
+	if len(o.Image) != 0 {
+		for _, img := range o.Image {
+			input.PostOverlay = append(input.PostOverlay, &apis.ContainerVolumeMountDiskPostOverlay{
+				Image: &apis.ContainerVolumeMountDiskPostImageOverlay{
+					Id: img,
+				},
+			})
+		}
+	}
+	return jsonutils.Marshal(input), nil
+}
+
+type ContainerRemoveVolumeMountPostOverlayOptions struct {
+	ContainerAddVolumeMountPostOverlayOptions
+	ClearLayers bool `help:"clear overlay upper and work layers"`
+	UseLazy     bool `help:"use lazy umount"`
+}
+
+func (o *ContainerRemoveVolumeMountPostOverlayOptions) Params() (jsonutils.JSONObject, error) {
+	params, err := o.ContainerAddVolumeMountPostOverlayOptions.Params()
+	if err != nil {
+		return nil, err
+	}
+	if o.ClearLayers {
+		params.(*jsonutils.JSONDict).Add(jsonutils.JSONTrue, "clear_layers")
+	}
+	if o.UseLazy {
+		params.(*jsonutils.JSONDict).Add(jsonutils.JSONTrue, "use_lazy")
+	}
+	return params, nil
+}
+
+type ContainerCopyOptions struct {
+	SRC_FILE          string
+	CONTAINER_ID_FILE string
+	RawFile           bool
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
+	"yunion.io/x/pkg/util/httputils"
 	"yunion.io/x/pkg/util/rbacscope"
 
 	"yunion.io/x/onecloud/pkg/apis/monitor"
@@ -37,9 +39,11 @@ import (
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
 	mod "yunion.io/x/onecloud/pkg/mcclient/modules/monitor"
+	"yunion.io/x/onecloud/pkg/monitor/datasource"
 	merrors "yunion.io/x/onecloud/pkg/monitor/errors"
 	mq "yunion.io/x/onecloud/pkg/monitor/metricquery"
 	"yunion.io/x/onecloud/pkg/monitor/options"
+	"yunion.io/x/onecloud/pkg/monitor/tsdb/driver/victoriametrics"
 	"yunion.io/x/onecloud/pkg/monitor/validators"
 )
 
@@ -200,6 +204,18 @@ func (self *SUnifiedMonitorManager) SetHandlerProcessTimeout(info *appsrv.SHandl
 	return 5 * time.Minute
 }
 
+// +onecloud:swagger-gen-route-method=POST
+// +onecloud:swagger-gen-route-path=/unifiedmonitors/query
+// +onecloud:swagger-gen-route-tag=unifiedmonitor
+// +onecloud:swagger-gen-param-body-index=0
+// +onecloud:swagger-gen-resp-index=0
+// +onecloud:swagger-gen-resp-body-key=unifiedmonitor
+
+// 查询监控数据接口
+func PerformQuery(input monitor.MetricQueryInput) *monitor.MetricsQueryResult {
+	return nil
+}
+
 func (self *SUnifiedMonitorManager) PerformQuery(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (*monitor.MetricsQueryResult, error) {
 	tmp := jsonutils.DeepCopy(data)
 	self.handleDataPreSignature(ctx, tmp)
@@ -222,7 +238,7 @@ func (self *SUnifiedMonitorManager) PerformQuery(ctx context.Context, userCred m
 		if ownId == nil {
 			ownId = userCred
 		}
-		setDefaultValue(q, inputQuery, scope, ownId)
+		setDefaultValue(q, inputQuery, scope, ownId, false)
 		if err := self.ValidateInputQuery(q, inputQuery); err != nil {
 			return nil, errors.Wrapf(err, "ValidateInputQuery")
 		}
@@ -334,6 +350,10 @@ func doQuery(userCred mcclient.TokenCredential, query monitor.MetricQueryInput) 
 			Type:  monitor.ConditionTypeMetricQuery,
 			Query: *q,
 		}
+		if q.ResultReducer != nil {
+			condition.Reducer = *q.ResultReducer
+			condition.ReducerOrder = q.ResultReducerOrder
+		}
 		conds = append(conds, &condition)
 	}
 	factory := mq.GetQueryFactories()[monitor.ConditionTypeMetricQuery]
@@ -362,6 +382,11 @@ func (self *SUnifiedMonitorManager) ValidateInputQuery(query *monitor.AlertQuery
 	}
 	if input.Interval == "" {
 		input.Interval = "5m"
+		if input.To == "now" {
+			if input.From == "10m" {
+				input.Interval = "1m"
+			}
+		}
 	}
 
 	if query.From == "" {
@@ -379,15 +404,18 @@ func (self *SUnifiedMonitorManager) ValidateInputQuery(query *monitor.AlertQuery
 	return validators.ValidateSelectOfMetricQuery(*query)
 }
 
-func setDefaultValue(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryInput,
-	scope string, ownerId mcclient.IIdentityProvider) {
+func setDefaultValue(
+	query *monitor.AlertQuery,
+	inputQuery *monitor.MetricQueryInput,
+	scope string, ownerId mcclient.IIdentityProvider,
+	isAlert bool) {
 	query.From = inputQuery.From
 	query.To = inputQuery.To
 	query.Model.Interval = inputQuery.Interval
 
 	metricMeasurement, _ := MetricMeasurementManager.GetCache().Get(query.Model.Measurement)
 
-	checkQueryGroupBy(query, inputQuery)
+	checkQueryGroupBy(query, inputQuery, isAlert)
 
 	if len(inputQuery.Interval) != 0 {
 		query.Model.GroupBy = append(query.Model.GroupBy,
@@ -423,16 +451,9 @@ func setDefaultValue(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryI
 		query.Model.Database = database
 	}
 
-	for i, sel := range query.Model.Selects {
-		if len(sel) > 1 {
-			continue
-		}
-		sel = append(sel, monitor.MetricQueryPart{
-			Type:   "mean",
-			Params: []string{},
-		})
-		query.Model.Selects[i] = sel
-	}
+	drv, _ := DataSourceManager.GetTSDBDriver()
+	query = drv.FillSelect(query, isAlert)
+
 	var projectId, domainId string
 	switch rbacscope.TRbacScope(scope) {
 	case rbacscope.ScopeProject:
@@ -480,7 +501,7 @@ func setDefaultValue(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryI
 	}
 }
 
-func checkQueryGroupBy(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryInput) {
+func checkQueryGroupBy(query *monitor.AlertQuery, inputQuery *monitor.MetricQueryInput, isAlert bool) {
 	if len(query.Model.GroupBy) != 0 {
 		return
 	}
@@ -490,16 +511,10 @@ func checkQueryGroupBy(query *monitor.AlertQuery, inputQuery *monitor.MetricQuer
 	}
 	tagId := ""
 	if metricMeasurement != nil {
-		tagId = monitor.MEASUREMENT_TAG_ID[metricMeasurement.ResType]
+		tagId = monitor.GetMeasurementTagIdKeyByResType(metricMeasurement.ResType)
 	}
-	if len(tagId) == 0 || (len(inputQuery.Slimit) != 0 && len(inputQuery.Soffset) != 0) {
-		tagId = "*"
-	}
-	query.Model.GroupBy = append(query.Model.GroupBy,
-		monitor.MetricQueryPart{
-			Type:   "field",
-			Params: []string{tagId},
-		})
+	drv, _ := DataSourceManager.GetTSDBDriver()
+	query = drv.FillGroupBy(query, inputQuery, tagId, isAlert)
 }
 
 func fillSerieTags(series *monitor.TimeSeriesSlice) {
@@ -512,7 +527,7 @@ func fillSerieTags(series *monitor.TimeSeriesSlice) {
 		}
 		for _, tag := range []string{
 			"source", "status", hostconsts.TELEGRAF_TAG_KEY_HOST_TYPE,
-			hostconsts.TELEGRAF_TAG_KEY_RES_TYPE, "cpu",
+			hostconsts.TELEGRAF_TAG_KEY_RES_TYPE,
 			"is_vm", "os_type", "domain_name", "region",
 			labels.MetricName, translator.UNION_RESULT_NAME,
 		} {
@@ -561,7 +576,14 @@ func (self *SUnifiedMonitorManager) GetPropertySimpleQuery(ctx context.Context, 
 	for k, v := range input.Tags {
 		where.Equal(k, v)
 	}
-	data.From(input.StartTime).To(input.EndTime).Interval("5m")
+	if len(input.Interval) == 0 {
+		input.Interval = "5m"
+	}
+	_, err := time.ParseDuration(input.Interval)
+	if err != nil {
+		return nil, httperrors.NewInputParameterError("invalid interval %s", input.Interval)
+	}
+	data.From(input.StartTime).To(input.EndTime).Interval(input.Interval)
 
 	queryData := data.ToQueryData()
 	dbRtn, err := self.performQuery(ctx, userCred, queryData)
@@ -595,4 +617,83 @@ func (self *SUnifiedMonitorManager) GetPropertySimpleQuery(ctx context.Context, 
 		}
 	}
 	return jsonutils.Marshal(map[string]interface{}{"values": ret}), nil
+}
+
+func (self *SUnifiedMonitorManager) GetPropertyCdfQuery(ctx context.Context, userCred mcclient.TokenCredential, input *monitor.CdfQueryInput) (*monitor.CdfQueryOutput, error) {
+	if len(input.Database) == 0 {
+		input.Database = "telegraf"
+	}
+	if len(input.MetricName) == 0 {
+		return nil, httperrors.NewMissingParameterError("metric_name")
+	}
+	input.MetricName = strings.Replace(input.MetricName, ".", "_", 1)
+	ds, err := datasource.GetDefaultSource(input.Database)
+	if err != nil {
+		return nil, errors.Wrapf(err, "GetDefaultSource")
+	}
+	client, err := victoriametrics.NewClient(ds.Url)
+	if err != nil {
+		return nil, errors.Wrapf(err, "NewClient")
+	}
+	if len(input.Period) == 0 {
+		input.Period = "1h"
+	}
+	sql := fmt.Sprintf("sum(histogram_over_time(avg_over_time(%s[%s]))) by (vmrange)", input.MetricName, input.Period)
+	if len(input.Tags) > 0 {
+		tags := []string{}
+		for k, v := range input.Tags {
+			tags = append(tags, fmt.Sprintf(`%s="%s"`, k, v))
+		}
+		sql = fmt.Sprintf("sum(histogram_over_time(avg_over_time(%s{%s}[%s]))) by (vmrange)", input.MetricName, strings.Join(tags, ","), input.Period)
+	}
+	resp, err := client.RawQuery(ctx, httputils.GetAdaptiveTimeoutClient(), sql, true)
+	if err != nil {
+		return nil, err
+	}
+	ret, total := monitor.CdfQueryDataSet{}, 0
+	for _, r := range resp.Data.Result {
+		if len(r.Metric) == 0 {
+			continue
+		}
+		vmrange, _ := r.Metric["vmrange"]
+		if len(vmrange) == 0 {
+			continue
+		}
+		if len(r.Value) != 2 {
+			continue
+		}
+		v, _ := strconv.Atoi(r.Value[1].(string))
+		ret = append(ret, monitor.CdfQueryData{
+			Vmrange: vmrange,
+			Value:   v,
+		})
+		total += v
+	}
+	sort.Sort(ret)
+	for i := range ret {
+		ret[i].Total = total
+		if i == 0 {
+			ret[i].ValueAsc = ret[i].Value
+		} else {
+			ret[i].ValueAsc = ret[i-1].ValueAsc + ret[i].Value
+		}
+	}
+	for i := len(ret) - 1; i >= 0; i-- {
+		if i == len(ret)-1 {
+			ret[i].ValueDesc = ret[i].Value
+		} else {
+			ret[i].ValueDesc = ret[i+1].ValueDesc + ret[i].Value
+		}
+	}
+	result := &monitor.CdfQueryOutput{
+		Data: monitor.CdfQueryDataSet{},
+	}
+	for i := range ret {
+		v1 := ret[i]
+		v1.Metric = v1.Start()
+		v2 := v1.Copy()
+		v2.Metric = v2.End()
+		result.Data = append(result.Data, v1, v2)
+	}
+	return result, nil
 }

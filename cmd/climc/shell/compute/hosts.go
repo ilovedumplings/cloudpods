@@ -37,9 +37,9 @@ import (
 func init() {
 	cmd := shell.NewResourceCmd(&modules.Hosts)
 	cmd.List(&compute.HostListOptions{})
-	cmd.Show(&options.BaseShowOptions{})
 	cmd.GetMetadata(&options.BaseIdOptions{})
 	cmd.GetProperty(&compute.HostStatusStatisticsOptions{})
+	cmd.Update(&compute.HostUpdateOptions{})
 
 	cmd.Perform("ping", &options.BaseIdOptions{})
 	cmd.Perform("purge", &options.BaseIdOptions{})
@@ -54,7 +54,9 @@ func init() {
 	cmd.Perform("probe-isolated-devices", &options.BaseIdOptions{})
 	cmd.Perform("class-metadata", &options.ResourceMetadataOptions{})
 	cmd.Perform("set-class-metadata", &options.ResourceMetadataOptions{})
+	cmd.PerformClass("validate-ipmi", &compute.HostValidateIPMI{})
 
+	cmd.BatchPerform("set-commit-bound", &compute.HostSetCommitBoundOptions{})
 	cmd.BatchPerform("enable", &options.BaseIdsOptions{})
 	cmd.BatchPerform("disable", &options.BaseIdsOptions{})
 	cmd.BatchPerform("syncstatus", &options.BaseIdsOptions{})
@@ -65,10 +67,16 @@ func init() {
 	cmd.BatchPerform("unreserve-cpus", &options.BaseIdsOptions{})
 	cmd.BatchPerform("auto-migrate-on-host-down", &compute.HostAutoMigrateOnHostDownOptions{})
 	cmd.BatchPerform("restart-host-agent", &options.BaseIdsOptions{})
+	cmd.BatchPerform("set-host-files", &compute.HostSetHostFilesOptions{})
 
 	cmd.Get("ipmi", &options.BaseIdOptions{})
 	cmd.Get("vnc", &options.BaseIdOptions{})
 	cmd.Get("app-options", &options.BaseIdOptions{})
+	cmd.Get("isolated-device-numa-stats", &compute.HostIsolatedDeviceNumaStatsOptions{})
+	cmd.GetWithCustomShow("worker-stats", func(data jsonutils.JSONObject) {
+		stats, _ := data.GetArray("workers")
+		printList(&printutils.ListResult{Data: stats}, nil)
+	}, &options.BaseIdOptions{})
 	cmd.Get("tap-config", &options.BaseIdOptions{})
 	cmd.GetWithCustomShow("nics", func(data jsonutils.JSONObject) {
 		results := printutils.ListResult{}
@@ -87,6 +95,37 @@ func init() {
 			fmt.Println("error", err)
 		}
 	}, &options.BaseIdOptions{})
+	cmd.GetWithCustomShow("host-files", func(data jsonutils.JSONObject) {
+		printObject(data)
+	}, &options.BaseIdOptions{})
+
+	R(&compute.HostShowOptions{}, "host-show", "Show details of a host", func(s *mcclient.ClientSession, args *compute.HostShowOptions) error {
+		params, err := args.Params()
+		if err != nil {
+			return err
+		}
+		result, err := modules.Hosts.Get(s, args.ID, params)
+		if err != nil {
+			return err
+		}
+		resultDict := result.(*jsonutils.JSONDict)
+		if !args.ShowAll {
+			if !args.ShowMetadata {
+				print("ShowMetadata\n")
+				resultDict.Remove("metadata")
+			}
+			if !args.ShowNicInfo {
+				print("ShowMetadata\n")
+				resultDict.Remove("nic_info")
+			}
+			if !args.ShowSysInfo {
+				print("ShowSysInfo\n")
+				resultDict.Remove("sys_info")
+			}
+		}
+		printObject(resultDict)
+		return nil
+	})
 
 	R(&options.BaseIdOptions{}, "host-logininfo", "Get SSH login information of a host", func(s *mcclient.ClientSession, args *options.BaseIdOptions) error {
 		i, e := modules.Hosts.PerformAction(s, args.ID, "login-info", nil)
@@ -172,87 +211,6 @@ func init() {
 		return nil
 	})
 
-	type HostUpdateOptions struct {
-		ID                string  `help:"ID or Name of Host"`
-		Name              string  `help:"New name of the host"`
-		Desc              string  `help:"New Description of the host"`
-		CpuCommitBound    float64 `help:"CPU overcommit upper bound at this host"`
-		MemoryCommitBound float64 `help:"Memory overcommit upper bound at this host"`
-		MemoryReserved    string  `help:"Memory reserved"`
-		CpuReserved       int64   `help:"CPU reserved"`
-		HostType          string  `help:"Change host type, CAUTION!!!!" choices:"hypervisor|kubelet|esxi|baremetal"`
-		// AccessIp          string  `help:"Change access ip, CAUTION!!!!"`
-		AccessMac          string `help:"Change baremetal access MAC, CAUTION!!!!"`
-		Uuid               string `help:"Change baremetal UUID,  CAUTION!!!!"`
-		EnableNumaAllocate string `help:"Host enable numa allocate" choices:"True|False"`
-
-		IpmiUsername string `help:"IPMI user"`
-		IpmiPassword string `help:"IPMI password"`
-		IpmiIpAddr   string `help:"IPMI ip_addr"`
-
-		Sn string `help:"serial number"`
-
-		Hostname string `help:"update host name"`
-	}
-	R(&HostUpdateOptions{}, "host-update", "Update information of a host", func(s *mcclient.ClientSession, args *HostUpdateOptions) error {
-		params := jsonutils.NewDict()
-		if len(args.Name) > 0 {
-			params.Add(jsonutils.NewString(args.Name), "name")
-		}
-		if len(args.Desc) > 0 {
-			params.Add(jsonutils.NewString(args.Desc), "description")
-		}
-		if args.CpuCommitBound > 0.0 {
-			params.Add(jsonutils.NewFloat64(args.CpuCommitBound), "cpu_cmtbound")
-		}
-		if args.MemoryCommitBound > 0.0 {
-			params.Add(jsonutils.NewFloat64(args.MemoryCommitBound), "mem_cmtbound")
-		}
-		if len(args.MemoryReserved) > 0 {
-			params.Add(jsonutils.NewString(args.MemoryReserved), "mem_reserved")
-		}
-		if args.CpuReserved > 0 {
-			params.Add(jsonutils.NewInt(args.CpuReserved), "cpu_reserved")
-		}
-		if len(args.HostType) > 0 {
-			params.Add(jsonutils.NewString(args.HostType), "host_type")
-		}
-		if len(args.AccessMac) > 0 {
-			params.Add(jsonutils.NewString(args.AccessMac), "access_mac")
-		}
-		if len(args.Uuid) > 0 {
-			params.Add(jsonutils.NewString(args.Uuid), "uuid")
-		}
-		if len(args.IpmiUsername) > 0 {
-			params.Add(jsonutils.NewString(args.IpmiUsername), "ipmi_username")
-		}
-		if len(args.IpmiPassword) > 0 {
-			params.Add(jsonutils.NewString(args.IpmiPassword), "ipmi_password")
-		}
-		if len(args.IpmiIpAddr) > 0 {
-			params.Add(jsonutils.NewString(args.IpmiIpAddr), "ipmi_ip_addr")
-		}
-		if len(args.Sn) > 0 {
-			params.Add(jsonutils.NewString(args.Sn), "sn")
-		}
-		if len(args.EnableNumaAllocate) > 0 {
-			enableNumaAllocate := false
-			if args.EnableNumaAllocate == "True" {
-				enableNumaAllocate = true
-			}
-			params.Add(jsonutils.NewBool(enableNumaAllocate), "enable_numa_allocate")
-		}
-		if params.Size() == 0 {
-			return fmt.Errorf("Not data to update")
-		}
-		result, err := modules.Hosts.Update(s, args.ID, params)
-		if err != nil {
-			return err
-		}
-		printObject(result)
-		return nil
-	})
-
 	type HostConvertOptions struct {
 		ID         string   `help:"Host ID or Name"`
 		Name       string   `help:"New name of the converted host"`
@@ -306,6 +264,7 @@ func init() {
 		INDEX     int64  `help:"nic index"`
 		Type      string `help:"Nic type" choices:"admin|ipmi"`
 		IpAddr    string `help:"IP address"`
+		Ip6Addr   string `help:"IPv6 address"`
 		Bridge    string `help:"Bridge of hostwire"`
 		Interface string `help:"Interface name, eg:eth0, en0"`
 	}
@@ -320,6 +279,9 @@ func init() {
 		}
 		if len(args.IpAddr) > 0 {
 			params.Add(jsonutils.NewString(args.IpAddr), "ip_addr")
+		}
+		if len(args.Ip6Addr) > 0 {
+			params.Add(jsonutils.NewString(args.Ip6Addr), "ip6_addr")
 		}
 		if len(args.Bridge) > 0 {
 			params.Add(jsonutils.NewString(args.Bridge), "bridge")
@@ -353,7 +315,8 @@ func init() {
 	type HostEnableNetIfOptions struct {
 		ID       string `help:"ID or Name of host"`
 		MAC      string `help:"MAC of NIC to enable"`
-		Ip       string `help:"IP address"`
+		Ip       string `help:"IPv4 address"`
+		Ip6      string `help:"IPv6 address"`
 		Network  string `help:"network to connect"`
 		Reserved bool   `help:"fetch IP from reserved pool"`
 	}
@@ -362,6 +325,11 @@ func init() {
 		params.Add(jsonutils.NewString(args.MAC), "mac")
 		if len(args.Ip) > 0 {
 			params.Add(jsonutils.NewString(args.Ip), "ip_addr")
+		}
+		if len(args.Ip6) > 0 {
+			params.Add(jsonutils.NewString(args.Ip6), "ip6_addr")
+		}
+		if len(args.Ip) > 0 || len(args.Ip6) > 0 {
 			if args.Reserved {
 				params.Add(jsonutils.JSONTrue, "reserve")
 			}
@@ -400,7 +368,7 @@ func init() {
 		ID     string `help:"ID or name of host"`
 		IMAGE  string `help:"ID or name of image"`
 		Force  bool   `help:"Force refresh cache, even if the image exists in cache"`
-		Format string `help:"image format" choices:"iso|vmdk|qcow2|vhd"`
+		Format string `help:"image format" choices:"iso|vmdk|qcow2|vhd|tgz"`
 	}
 	R(&HostCacheImageActionOptions{}, "host-cache-image", "Ask a host to cache a image", func(s *mcclient.ClientSession, args *HostCacheImageActionOptions) error {
 		params := jsonutils.NewDict()
@@ -601,7 +569,7 @@ func init() {
 		i, e := modules.Hosts.PerformAction(s, args.ID, "login-info", nil)
 		privateKey := ""
 		if e != nil {
-			if httputils.ErrorCode(e) == 404 || e.Error() == "ciphertext too short" {
+			if httputils.ErrorCode(e) == 404 || strings.Contains(e.Error(), "ciphertext too short") {
 				var err error
 				privateKey, err = modules.Sshkeypairs.FetchPrivateKeyBySession(context.Background(), s)
 				if err != nil {

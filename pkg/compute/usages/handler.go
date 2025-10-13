@@ -687,6 +687,7 @@ func StorageUsage(
 		count[fmt.Sprintf("%s.medium_type.%s", sPrefix, m)] = capa
 	}
 	count[fmt.Sprintf("%s.virtual", sPrefix)] = result.CapacityVirtual
+	count[fmt.Sprintf("%s.actual_capacity_used", sPrefix)] = result.ActualCapacityUsed
 	count[fmt.Sprintf("%s.owner", dPrefix)] = result.CapacityUsed
 	count[fmt.Sprintf("%s.count.owner", dPrefix)] = result.CountUsed
 	count[fmt.Sprintf("%s.unready.owner", dPrefix)] = result.CapacityUnready
@@ -1043,6 +1044,9 @@ func IsolatedDeviceUsage(ctx context.Context, userToken mcclient.TokenCredential
 	}
 	ret, _ := models.IsolatedDeviceManager.TotalCount(ctx, scope, userCred, hostType, resourceTypes, providers, brands, cloudEnv, rangeObjs, results)
 	count[prefix] = ret.Devices
+	count[prefix+".used"] = ret.DevicesUsed
+	count[prefix+".gpu"] = ret.Gpus
+	count[prefix+".gpu.used"] = ret.GpusUsed
 	return count
 }
 

@@ -17,6 +17,7 @@ package models
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"gopkg.in/fatih/set.v0"
 
@@ -258,6 +259,31 @@ func (manager *SCloudgroupManager) FetchCustomizeColumns(
 	return rows
 }
 
+func (manager *SCloudgroupManager) QueryDistinctExtraField(q *sqlchemy.SQuery, field string) (*sqlchemy.SQuery, error) {
+	switch field {
+	case "manager":
+		managerQuery := CloudproviderManager.Query("name", "id").SubQuery()
+		q.AppendField(managerQuery.Field("name", field)).Distinct()
+		q = q.Join(managerQuery, sqlchemy.Equals(q.Field("manager_id"), managerQuery.Field("id")))
+		return q, nil
+	case "account":
+		accountQuery := CloudaccountManager.Query("name", "id").SubQuery()
+		providers := CloudproviderManager.Query("id", "cloudaccount_id").SubQuery()
+		q.AppendField(accountQuery.Field("name", field)).Distinct()
+		q = q.Join(providers, sqlchemy.Equals(q.Field("manager_id"), providers.Field("id")))
+		q = q.Join(accountQuery, sqlchemy.Equals(providers.Field("cloudaccount_id"), accountQuery.Field("id")))
+		return q, nil
+	case "provider", "brand":
+		accountQuery := CloudaccountManager.Query(field, "id").Distinct().SubQuery()
+		providers := CloudproviderManager.Query("id", "cloudaccount_id").SubQuery()
+		q.AppendField(accountQuery.Field(field)).Distinct()
+		q = q.Join(providers, sqlchemy.Equals(q.Field("manager_id"), providers.Field("id")))
+		q = q.Join(accountQuery, sqlchemy.Equals(providers.Field("cloudaccount_id"), accountQuery.Field("id")))
+		return q, nil
+	}
+	return q, httperrors.ErrNotFound
+}
+
 // 创建权限组
 func (manager *SCloudgroupManager) ValidateCreateData(
 	ctx context.Context,
@@ -350,26 +376,6 @@ func (self *SCloudgroup) GetCloudpolicyCount() (int, error) {
 func (self *SCloudgroup) GetCloudpolicies() ([]SCloudpolicy, error) {
 	policies := []SCloudpolicy{}
 	q := self.GetCloudpolicyQuery()
-	err := db.FetchModelObjects(CloudpolicyManager, q, &policies)
-	if err != nil {
-		return nil, errors.Wrap(err, "db.FetchModelObjects")
-	}
-	return policies, nil
-}
-
-func (self *SCloudgroup) GetSystemCloudpolicies() ([]SCloudpolicy, error) {
-	policies := []SCloudpolicy{}
-	q := self.GetCloudpolicyQuery().Equals("policy_type", api.CLOUD_POLICY_TYPE_SYSTEM)
-	err := db.FetchModelObjects(CloudpolicyManager, q, &policies)
-	if err != nil {
-		return nil, errors.Wrap(err, "db.FetchModelObjects")
-	}
-	return policies, nil
-}
-
-func (self *SCloudgroup) GetCustomCloudpolicies() ([]SCloudpolicy, error) {
-	policies := []SCloudpolicy{}
-	q := self.GetCloudpolicyQuery().Equals("policy_type", api.CLOUD_POLICY_TYPE_CUSTOM)
 	err := db.FetchModelObjects(CloudpolicyManager, q, &policies)
 	if err != nil {
 		return nil, errors.Wrap(err, "db.FetchModelObjects")
@@ -636,7 +642,7 @@ func (self *SCloudgroup) PerformSetPolicies(ctx context.Context, userCred mcclie
 			return nil, err
 		}
 		policy := policObj.(*SCloudpolicy)
-		if policy.ManagerId != self.ManagerId || policy.CloudaccountId != self.CloudaccountId {
+		if (policy.ManagerId != self.ManagerId && len(self.ManagerId) > 0) || policy.CloudaccountId != self.CloudaccountId {
 			return nil, httperrors.NewConflictError("Policies and groups do not belong to the same account")
 		}
 		newP.Add(policy.Id)
@@ -748,8 +754,8 @@ func (self *SCloudgroup) attachPolicy(policyId string) error {
 }
 
 func (self *SCloudaccount) SyncCloudgroups(ctx context.Context, userCred mcclient.TokenCredential, iGroups []cloudprovider.ICloudgroup, managerId string) ([]SCloudgroup, []cloudprovider.ICloudgroup, compare.SyncResult) {
-	lockman.LockRawObject(ctx, CloudgroupManager.Keyword(), self.Id)
-	defer lockman.ReleaseRawObject(ctx, CloudgroupManager.Keyword(), self.Id)
+	lockman.LockRawObject(ctx, CloudgroupManager.Keyword(), fmt.Sprintf("%s-%s", self.Id, managerId))
+	defer lockman.ReleaseRawObject(ctx, CloudgroupManager.Keyword(), fmt.Sprintf("%s-%s", self.Id, managerId))
 
 	result := compare.SyncResult{}
 	dbGroups, err := self.GetCloudgroups(managerId)
@@ -851,7 +857,7 @@ func (group *SCloudgroup) GetICloudgroup() (cloudprovider.ICloudgroup, error) {
 			return groups[i], nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, group.ExternalId)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%v", group.ExternalId)
 }
 
 func (group *SCloudgroup) SyncWithCloudgroup(ctx context.Context, userCred mcclient.TokenCredential, iGroup cloudprovider.ICloudgroup) error {
@@ -864,9 +870,6 @@ func (group *SCloudgroup) SyncWithCloudgroup(ctx context.Context, userCred mccli
 }
 
 func (self *SCloudaccount) newCloudgroup(ctx context.Context, userCred mcclient.TokenCredential, iGroup cloudprovider.ICloudgroup, managerId string) (*SCloudgroup, error) {
-	lockman.LockObject(ctx, self)
-	defer lockman.ReleaseObject(ctx, self)
-
 	group := &SCloudgroup{}
 	group.SetModelManager(CloudgroupManager, group)
 	group.Name = iGroup.GetName()
@@ -991,7 +994,7 @@ func (self *SCloudgroup) SyncPolicies(ctx context.Context, userCred mcclient.Tok
 			return q.Equals("cloudaccount_id", self.CloudaccountId)
 		})
 		if err != nil {
-			result.AddError(errors.Wrapf(err, "add %s", added[i].GetName()))
+			result.AddError(errors.Wrapf(err, "add %s(%s)", added[i].GetName(), added[i].GetGlobalId()))
 			continue
 		}
 		err = self.attachPolicy(policy.GetId())

@@ -15,66 +15,41 @@
 package misc
 
 import (
-	"yunion.io/x/jsonutils"
+	"fmt"
 
+	"yunion.io/x/jsonutils"
+	"yunion.io/x/pkg/errors"
+
+	"yunion.io/x/onecloud/pkg/apis"
 	"yunion.io/x/onecloud/pkg/mcclient"
+	"yunion.io/x/onecloud/pkg/mcclient/modulebase"
 	"yunion.io/x/onecloud/pkg/mcclient/modules/compute"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/devtool"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/identity"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/image"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/k8s"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/notify"
 )
 
-func init() {
-	type RegionTaskListOptions struct {
-		ObjName  string `help:"object name"`
-		ObjId    string `help:"object id"`
-		TaskName string `help:"task name"`
-	}
-	R(&RegionTaskListOptions{}, "region-task-list", "List tasks on region server", func(s *mcclient.ClientSession, args *RegionTaskListOptions) error {
-		params := jsonutils.Marshal(args)
-		result, err := compute.ComputeTasks.List(s, params)
-		if err != nil {
-			return err
-		}
-		printList(result, compute.ComputeTasks.GetColumns(s))
-		return nil
-	})
-
-	type RegionTaskShowOptions struct {
-		ID string `help:"ID or name of the task"`
-	}
-	R(&RegionTaskShowOptions{}, "region-task-show", "Show details of a region task", func(s *mcclient.ClientSession, args *RegionTaskShowOptions) error {
-		result, err := compute.ComputeTasks.Get(s, args.ID, nil)
-		if err != nil {
-			return err
-		}
-		printObject(result)
-		return nil
-	})
-
+func RegisterTaskCmds(service string, manager modulebase.Manager, archivedManager modulebase.Manager) {
 	type TaskListOptions struct {
-		ObjName     string `help:"object name"`
-		ObjId       string `help:"object id"`
-		TaskName    string `help:"task name"`
-		ServiceType string `choices:"image|cloudid|cloudevent|devtool|ansible|identity|notify|log|compute|compute_v2"`
+		apis.TaskListInput
 	}
-	R(&TaskListOptions{}, "task-list", "List tasks", func(s *mcclient.ClientSession, args *TaskListOptions) error {
+	R(&TaskListOptions{}, fmt.Sprintf("%s-task-list", service), fmt.Sprintf("List tasks on %s server", service), func(s *mcclient.ClientSession, args *TaskListOptions) error {
 		params := jsonutils.Marshal(args)
-		man := compute.TasksManager{}
-		result, err := man.List(s, params)
+		result, err := manager.List(s, params)
 		if err != nil {
 			return err
 		}
-		printList(result, man.GetColumns(s))
+		printList(result, manager.GetColumns(s))
 		return nil
 	})
 
 	type TaskShowOptions struct {
-		ID          string `help:"ID or name of the task"`
-		ServiceType string `choices:"image|cloudid|cloudevent|devtool|ansible|identity|notify|log|compute|compute_v2"`
+		ID string `help:"ID or name of the task"`
 	}
-
-	R(&TaskShowOptions{}, "task-show", "Show details of a task", func(s *mcclient.ClientSession, args *TaskShowOptions) error {
-		man := compute.TasksManager{}
-		params := jsonutils.Marshal(args)
-		result, err := man.Get(s, args.ID, params)
+	R(&TaskShowOptions{}, fmt.Sprintf("%s-task-show", service), fmt.Sprintf("Show details of a %s task", service), func(s *mcclient.ClientSession, args *TaskShowOptions) error {
+		result, err := manager.GetById(s, args.ID, nil)
 		if err != nil {
 			return err
 		}
@@ -82,4 +57,84 @@ func init() {
 		return nil
 	})
 
+	R(&TaskShowOptions{}, fmt.Sprintf("%s-task-cancel", service), fmt.Sprintf("Cancel a %s task", service), func(s *mcclient.ClientSession, args *TaskShowOptions) error {
+		result, err := manager.PerformAction(s, args.ID, "cancel", nil)
+		if err != nil {
+			return err
+		}
+		printObject(result)
+		return nil
+	})
+
+	R(&TaskListOptions{}, fmt.Sprintf("%s-archived-task-list", service), fmt.Sprintf("List archived tasks on %s server", service), func(s *mcclient.ClientSession, args *TaskListOptions) error {
+		params := jsonutils.Marshal(args)
+		result, err := archivedManager.List(s, params)
+		if err != nil {
+			return err
+		}
+		printList(result, archivedManager.GetColumns(s))
+		return nil
+	})
+
+	R(&TaskShowOptions{}, fmt.Sprintf("%s-archived-task-show", service), fmt.Sprintf("Show details of an archived %s task", service), func(s *mcclient.ClientSession, args *TaskShowOptions) error {
+		params := jsonutils.NewDict()
+		params.Set("task_id", jsonutils.NewString(args.ID))
+		result, err := archivedManager.List(s, params)
+		if err != nil {
+			return err
+		}
+		if result.Total == 1 {
+			printObject(result.Data[0])
+			return nil
+		} else if result.Total == 0 {
+			return errors.Wrapf(errors.ErrNotFound, "not found %s", args.ID)
+		} else {
+			printList(result, archivedManager.GetColumns(s))
+			return errors.Wrapf(errors.ErrDuplicateId, "found %d record for %s", result.Total, args.ID)
+		}
+	})
+}
+
+func init() {
+	cmds := []struct {
+		service string
+		manager modulebase.Manager
+
+		archivedManager modulebase.Manager
+	}{
+		{
+			service:         "region",
+			manager:         &compute.ComputeTasks,
+			archivedManager: &compute.ArchivedComputeTasks,
+		},
+		{
+			service:         "devtool",
+			manager:         &devtool.DevtoolTasks,
+			archivedManager: &devtool.ArchivedDevtoolTasks,
+		},
+		{
+			service:         "image",
+			manager:         &image.Tasks,
+			archivedManager: &image.ArchivedTasks,
+		},
+		{
+			service:         "identity",
+			manager:         &identity.Tasks,
+			archivedManager: &identity.ArchivedTasks,
+		},
+		{
+			service:         "k8s",
+			manager:         k8s.KubeTasks,
+			archivedManager: k8s.ArchivedKubeTasks,
+		},
+		{
+			service:         "notify",
+			manager:         &notify.Tasks,
+			archivedManager: &notify.ArchivedTasks,
+		},
+	}
+	for i := range cmds {
+		c := cmds[i]
+		RegisterTaskCmds(c.service, c.manager, c.archivedManager)
+	}
 }

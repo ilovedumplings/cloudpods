@@ -132,6 +132,7 @@ type IModelManager interface {
 
 	// 如果error为非空，说明没有匹配的field，如果为空，说明匹配上了
 	QueryDistinctExtraField(q *sqlchemy.SQuery, field string) (*sqlchemy.SQuery, error)
+	QueryDistinctExtraFields(q *sqlchemy.SQuery, resource string, fields []string) (*sqlchemy.SQuery, error)
 
 	GetPagingConfig() *SPagingConfig
 
@@ -151,6 +152,7 @@ type IModelManager interface {
 
 type IModelManagerExtraHook interface {
 	AfterPostCreate(ctx context.Context, userCred mcclient.TokenCredential, ownerId mcclient.IIdentityProvider, model IModel, query jsonutils.JSONObject, data jsonutils.JSONObject) error
+	AfterPostDelete(ctx context.Context, userCred mcclient.TokenCredential, model IModel, query jsonutils.JSONObject) error
 }
 
 type IModel interface {

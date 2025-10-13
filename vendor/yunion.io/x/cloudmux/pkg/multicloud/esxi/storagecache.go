@@ -42,6 +42,7 @@ type SDatastoreImageCache struct {
 type EsxiOptions struct {
 	ReasonableCIDREsxi string `help:"Reasonable CIDR in esxi, such as '10.0.0.0/8'" defautl:""`
 	TemplateNameRegex  string `help:"Regex of template name"`
+	EnableEsxiSwap     bool   `help:"Enable esxi vm swap" default:"false"`
 }
 
 var tempalteNameRegex *regexp.Regexp
@@ -289,7 +290,7 @@ func (self *SDatastoreImageCache) GetIImageInTemplateVMsById(id string) (cloudpr
 			return NewVMTemplate(vm, self), nil
 		}
 	}
-	return nil, errors.Wrapf(cloudprovider.ErrNotFound, id)
+	return nil, errors.Wrapf(cloudprovider.ErrNotFound, "%s", id)
 }
 
 func (self *SDatastoreImageCache) GetICustomizedCloudImages() ([]cloudprovider.ICloudImage, error) {

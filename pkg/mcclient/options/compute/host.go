@@ -17,6 +17,7 @@ package compute
 import (
 	"yunion.io/x/jsonutils"
 
+	"yunion.io/x/onecloud/pkg/apis/baremetal"
 	"yunion.io/x/onecloud/pkg/mcclient/options"
 )
 
@@ -32,7 +33,7 @@ type HostListOptions struct {
 	Occupied        bool     `help:"show occupid host" json:"-"`
 	Enabled         bool     `help:"Show enabled host only" json:"-"`
 	Disabled        bool     `help:"Show disabled host only" json:"-"`
-	HostType        string   `help:"Host type filter" choices:"baremetal|hypervisor|esxi|kubelet|hyperv|aliyun|azure|qcloud|aws|huawei|ucloud|google|ctyun"`
+	HostType        string   `help:"Host type filter" choices:"baremetal|hypervisor|esxi|container|hyperv|aliyun|azure|qcloud|aws|huawei|ucloud|google|ctyun"`
 	AnyMac          string   `help:"Mac matches one of the host's interface"`
 	AnyIp           []string `help:"IP matches one of the host's interface"`
 	HostStorageType []string `help:"List host in host_storage_type"`
@@ -58,6 +59,24 @@ type HostListOptions struct {
 	OrderByStorageCommitRate string `help:"Order by host storage commite rate" choices:"desc|asc"`
 	OrderByCpuCommitRate     string `help:"Order by host cpu commit rate" choices:"desc|asc"`
 	OrderByMemCommitRate     string `help:"Order by host meme commit rate" choices:"desc|asc"`
+
+	OrderByStorageUsed string `help:"Order by storage used" choices:"desc|asc"`
+	OrderByCpuCommit   string `help:"Order by cpu commit" choices:"desc|asc"`
+	OrderByMemCommit   string `help:"Order by mem commit" choices:"desc|asc"`
+
+	OrderByCpuUsage string `help:"Order by cpu usage" choices:"desc|asc"`
+	OrderByMemUsage string `help:"Order by mem usage" choices:"desc|asc"`
+
+	OrderByStorageUsage        string `help:"Order by storage usage" choices:"desc|asc"`
+	OrderByVirtualMemUsage     string `help:"Order by virtual mem usage" choices:"desc|asc"`
+	OrderByVirtualCpuUsage     string `help:"Order by virtual cpu usage" choices:"desc|asc"`
+	OrderByVirtualStorageUsage string `help:"Order by virtual storage usage" choices:"desc|asc"`
+
+	HideCpuTopoInfo *bool `help:"Host list will remove cpu_info and topology info from sysinfo and metadata"`
+
+	AccessIp []string `help:"Access ip address"`
+	IpmiIp   []string `help:"Ipmi ip address"`
+	PublicIp []string `help:"Public ip address"`
 
 	options.BaseListOptions
 }
@@ -86,15 +105,29 @@ func (opts *HostListOptions) Params() (jsonutils.JSONObject, error) {
 	return params, nil
 }
 
+type HostShowOptions struct {
+	options.BaseShowOptions
+	ShowMetadata bool `help:"Show host metadata in details"`
+	ShowNicInfo  bool `help:"Show host nic_info in details"`
+	ShowSysInfo  bool `help:"Show host sys_info in details"`
+	ShowAll      bool `help:"Show all of host details" short-token:"a"`
+}
+
+func (o *HostShowOptions) Params() (jsonutils.JSONObject, error) {
+	// NOTE: host show only request with base options
+	return jsonutils.Marshal(o.BaseShowOptions), nil
+}
+
 type HostReserveCpusOptions struct {
 	options.BaseIdsOptions
 	Cpus                    string
 	Mems                    string
 	DisableSchedLoadBalance bool
+	ProcessesPrefix         []string `help:"Processes prefix bind reserved cpus"`
 }
 
 func (o *HostReserveCpusOptions) Params() (jsonutils.JSONObject, error) {
-	return options.StructToParams(o)
+	return jsonutils.Marshal(o), nil
 }
 
 type HostAutoMigrateOnHostDownOptions struct {
@@ -107,7 +140,97 @@ func (o *HostAutoMigrateOnHostDownOptions) Params() (jsonutils.JSONObject, error
 	return options.StructToParams(o)
 }
 
+type HostSetCommitBoundOptions struct {
+	options.BaseIdsOptions
+	CpuCmtbound *float32 `help:"Cpu commit bound"`
+	MemCmtBound *float32 `help:"Mem commit bound"`
+}
+
+func (o *HostSetCommitBoundOptions) Params() (jsonutils.JSONObject, error) {
+	return options.StructToParams(o)
+}
+
+type HostSetHostFilesOptions struct {
+	options.BaseIdsOptions
+	HostFiles []string `help:"Host files"`
+}
+
+func (o *HostSetHostFilesOptions) Params() (jsonutils.JSONObject, error) {
+	return jsonutils.Marshal(o), nil
+}
+
 type HostStatusStatisticsOptions struct {
 	HostListOptions
 	options.StatusStatisticsOptions
+}
+
+type HostValidateIPMI struct {
+	IP       string `json:"ip" help:"IPMI ip address"`
+	USERNAME string `json:"username" help:"IPMI username"`
+	PASSWORD string `json:"password" help:"IPMI password"`
+}
+
+func (h HostValidateIPMI) Params() (jsonutils.JSONObject, error) {
+	return jsonutils.Marshal(baremetal.ValidateIPMIRequest{
+		Ip:       h.IP,
+		Username: h.USERNAME,
+		Password: h.PASSWORD,
+	}), nil
+}
+
+type HostIsolatedDeviceNumaStatsOptions struct {
+	options.BaseIdOptions
+
+	DevType string `json:"dev_type"`
+}
+
+func (o *HostIsolatedDeviceNumaStatsOptions) Params() (jsonutils.JSONObject, error) {
+	return jsonutils.Marshal(o), nil
+}
+
+type HostUpdateOptions struct {
+	options.BaseIdOptions
+	Name        string  `help:"New name of the host"`
+	Description *string `help:"New Description of the host"`
+	MemReserved *string `help:"Memory reserved"`
+	CpuReserved *int64  `help:"CPU reserved"`
+	HostType    *string `help:"Change host type, CAUTION!!!!" choices:"hypervisor|kubelet|esxi|baremetal"`
+	CpuCount    *int
+	NodeCount   *int8
+	CpuDesc     *string
+	MemSize     *int
+	StorageSize *int64
+	// AccessIp          string  `help:"Change access ip, CAUTION!!!!"`
+	AccessMac          *string `help:"Change baremetal access MAC, CAUTION!!!!"`
+	Uuid               *string `help:"Change baremetal UUID,  CAUTION!!!!"`
+	EnableNumaAllocate string  `help:"Host enable numa allocate" choices:"True|False"`
+
+	IpmiUsername *string `help:"IPMI user"`
+	IpmiPassword *string `help:"IPMI password"`
+	IpmiIpAddr   *string `help:"IPMI ip_addr"`
+
+	Sn *string `help:"serial number"`
+
+	Hostname *string `help:"update host name"`
+
+	PublicIp *string `help:"public_ip"`
+
+	NoPublicIp *bool `help:"clear public ip"`
+}
+
+func (opts *HostUpdateOptions) Params() (jsonutils.JSONObject, error) {
+	v := jsonutils.Marshal(opts).(*jsonutils.JSONDict)
+	if opts.NoPublicIp != nil && *opts.NoPublicIp {
+		v.Set("public_ip", jsonutils.NewString(""))
+		v.Remove("no_public_ip")
+	}
+	if len(opts.EnableNumaAllocate) > 0 {
+		enableNumaAllocate := false
+		if opts.EnableNumaAllocate == "True" {
+			enableNumaAllocate = true
+		}
+		v.Set("enable_numa_allocate", jsonutils.NewBool(enableNumaAllocate))
+	}
+	v.Remove("id")
+	return v, nil
 }
